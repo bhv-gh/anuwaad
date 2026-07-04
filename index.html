@@ -122,7 +122,7 @@
   .st-top { display: flex; align-items: center; gap: 12px; padding: 16px 22px; }
   .st-top .spacer { flex: 1; }
   .st-count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .st-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 24px; text-align: center; gap: 16px; overflow-y: auto; }
+  .st-mid { flex: 1; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 24px; text-align: center; gap: 16px; overflow-y: auto; }
   .st-video-wrap {
     width: min(620px, 92vw); border-radius: 12px; overflow: hidden;
     background: #000; border: 1px solid var(--border); flex-shrink: 0;
@@ -131,6 +131,24 @@
   .st-video-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--muted); padding: 26px 22px; font-size: 14px; }
   .st-video-empty .vemoji { font-size: 34px; }
   .st-video-empty .vnote { font-size: 11px; opacity: .75; max-width: 340px; line-height: 1.4; }
+  .st-wavebox { position: relative; display: flex; align-items: center; justify-content: center; min-height: 130px; }
+
+  /* ---- Overlay view: subtitle + waveform layered on top of the video ---- */
+  .st-mid.overlay { padding: 0; gap: 0; justify-content: stretch; overflow: hidden; }
+  .st-mid.overlay .st-video-wrap { width: 100%; max-width: none; flex: 1; border: none; border-radius: 0; display: flex; align-items: center; justify-content: center; }
+  .st-mid.overlay #video { max-height: 100%; height: 100%; width: 100%; object-fit: contain; }
+  .st-mid.overlay .st-timecode { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6; background: rgba(0,0,0,.55); padding: 3px 12px; border-radius: 999px; }
+  .st-mid.overlay .st-status { position: absolute; top: 10px; right: 14px; z-index: 6; background: rgba(0,0,0,.55); padding: 4px 12px; border-radius: 999px; }
+  .st-mid.overlay .st-text {
+    position: absolute; left: 50%; bottom: 92px; transform: translateX(-50%); z-index: 6;
+    width: min(90%, 900px); background: rgba(0,0,0,.6); padding: 12px 20px; border-radius: 12px;
+    font-size: clamp(18px, 2.6vw, 32px); backdrop-filter: blur(3px);
+  }
+  .st-mid.overlay .st-wavebox { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 6; min-height: 0; width: min(600px, 80%); pointer-events: none; }
+  .st-mid.overlay .st-wavebox canvas { height: 66px; }
+  .st-mid.overlay .st-timer { position: absolute; bottom: 16px; right: 16px; z-index: 7; background: rgba(0,0,0,.55); padding: 3px 10px; border-radius: 999px; }
+  .st-mid.overlay .st-hint { position: absolute; bottom: 66px; left: 50%; transform: translateX(-50%); z-index: 6; background: rgba(0,0,0,.45); padding: 3px 12px; border-radius: 999px; }
+  .st-mid.overlay .st-video-empty { position: static; }
   .st-timecode { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: .5px; }
   .st-text {
     font-size: clamp(22px, 4.2vw, 44px); font-weight: 600; max-width: 900px;
@@ -204,6 +222,7 @@
     <button id="stList" class="ghost">☰ List</button>
     <button id="stExportTop" class="ghost">⤓ Export</button>
     <button id="stVideoBtn" class="ghost">🎬 Video</button>
+    <button id="stViewBtn" class="ghost">⧉ Overlay view</button>
     <div class="spacer"></div>
     <span class="st-count" id="stCount"></span>
   </div>
@@ -221,7 +240,7 @@
     <div class="st-timecode" id="stTime"></div>
     <div class="st-text" id="stText"></div>
     <div class="st-status" id="stStatus"></div>
-    <div style="position:relative;display:flex;align-items:center;justify-content:center;min-height:130px">
+    <div class="st-wavebox">
       <canvas id="wave" width="760" height="130"></canvas>
       <div class="st-countdown" id="stCountdown" style="display:none"></div>
     </div>
@@ -245,12 +264,8 @@
       <button id="stRedo">↻ Redo</button>
       <button id="stSkip">Skip ▶</button>
     </div>
-    <div class="st-keys">SPACE start / stop · ← → skip lines · ESC exit</div>
+    <div class="st-keys">SPACE watch → record → stop · ← → skip lines · ESC exit</div>
     <div class="st-settings">
-      <label>Think time before recording
-        <input type="range" id="setPrep" min="0" max="12" step="1">
-        <b><span id="setPrepV"></span>s</b>
-      </label>
       <label>Silence to auto-advance
         <input type="range" id="setSilence" min="0.5" max="4" step="0.1">
         <b><span id="setSilenceV"></span>s</b>
@@ -281,7 +296,7 @@ let srtName = "";
 let db = null;
 
 /* Studio session state */
-const settings = { prep: 4, silence: 1.5, sens: 5 };
+const settings = { silence: 1.5, sens: 5, overlay: false };
 let studioOn = false;
 let stIndex = 0;
 let phase = "idle";    // idle | prep | recording | saving | paused | done
@@ -493,8 +508,9 @@ function gotoIdle() {
 
 function updatePrimaryBtn() {
   const b = $("stPause");
-  if (phase === "idle" || phase === "done" || phase === "seeking") b.textContent = "▶ Start Recording";
+  if (phase === "idle" || phase === "done" || phase === "seeking") b.textContent = "▶ Start";
   else if (paused) b.textContent = "▶ Resume";
+  else if (phase === "preview") b.textContent = "● Record";
   else b.textContent = "⏸ Pause";
 }
 
@@ -631,28 +647,35 @@ function seekVideoToCurrent() {
   const t = cues[stIndex] ? cues[stIndex].start : 0;
   try { v.currentTime = Math.max(0, Math.min(t, v.duration - 0.05)); } catch (e) {}
 }
-function playVideoScene() {
+function playVideo(muted) {
   const v = $("video");
   if (!videoReady) return;
+  v.muted = !!muted;
   seekVideoToCurrent();
   const p = v.play();
   if (p && p.catch) p.catch(() => {});
 }
 function pauseVideo() { const v = $("video"); if (videoReady) { try { v.pause(); } catch (e) {} } }
 
-/* ---- PREP phase: give thinking time, countdown, then auto-record ---- */
-function gotoPrep() {
-  phase = "prep";
+/* ---- PREVIEW phase: watch the scene WITH sound, then hotkey to record ---- */
+function gotoPreview() {
+  phase = "preview";
   hasSpoken = false;
   showCurrentLine();
   $("stTimer").textContent = "";
-  $("stHint").textContent = "Read the line and get your Konkani ready · SPACE to start now";
-  if (settings.prep <= 0) { gotoRecording(); return; }
-  prepEndTs = performance.now() + settings.prep * 1000;
-  $("stCountdown").style.display = "";
-  setStatus('<span class="prep">GET READY…</span>');
+  $("stCountdown").style.display = "none";
   updatePrimaryBtn();
+  if (videoReady) {
+    setStatus('<span class="prep">▶ WATCH THE SCENE</span>');
+    $("stHint").textContent = "Watch & listen to the scene · press SPACE to start recording (video mutes)";
+    playVideo(false); // play WITH original sound
+  } else {
+    setStatus('<span class="prep">READY</span>');
+    $("stHint").textContent = "Press SPACE to start recording";
+  }
 }
+/* Back-compat alias for the transport helpers. */
+const gotoPrep = gotoPreview;
 
 /* ---- RECORDING phase ---- */
 function gotoRecording() {
@@ -663,7 +686,7 @@ function gotoRecording() {
   recChunks = [];
   $("stCountdown").style.display = "none";
   setStatus('<span class="rec">● RECORDING</span>');
-  $("stHint").textContent = "Speak now · pause when done to auto-advance · SPACE to stop";
+  $("stHint").textContent = "Speak now (video muted) · pause when done to auto-advance · SPACE to stop";
   const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
              : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
   mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
@@ -672,7 +695,7 @@ function gotoRecording() {
   mediaRecorder.start();
   recStartTs = performance.now();
   updatePrimaryBtn();
-  playVideoScene();
+  playVideo(true); // replay the scene MUTED while recording
 }
 
 function cancelRecorder() {
@@ -779,11 +802,7 @@ function tick() {
 
   const now = performance.now();
 
-  if (phase === "prep") {
-    const remain = Math.max(0, prepEndTs - now);
-    $("stCountdown").textContent = Math.ceil(remain / 1000);
-    if (remain <= 0) gotoRecording();
-  } else if (phase === "recording") {
+  if (phase === "recording") {
     const el = (now - recStartTs) / 1000;
     $("stTimer").textContent = "● " + el.toFixed(1) + "s";
     const thr = sensThreshold();
@@ -964,9 +983,14 @@ async function promptLanguage() {
 /* ================= Settings ================= */
 function loadSettings() {
   try { const s = JSON.parse(localStorage.getItem("srtdub-settings") || "{}"); Object.assign(settings, s); } catch (e) {}
-  $("setPrep").value = settings.prep; $("setPrepV").textContent = settings.prep;
   $("setSilence").value = settings.silence; $("setSilenceV").textContent = settings.silence.toFixed(1);
   $("setSens").value = settings.sens; $("setSensV").textContent = settings.sens;
+  applyView();
+}
+function applyView() {
+  const mid = document.querySelector(".st-mid");
+  if (mid) mid.classList.toggle("overlay", !!settings.overlay);
+  $("stViewBtn").textContent = settings.overlay ? "▤ Stacked view" : "⧉ Overlay view";
 }
 function saveSettings() { localStorage.setItem("srtdub-settings", JSON.stringify(settings)); }
 
@@ -988,6 +1012,7 @@ $("stExportTop").onclick = exportAudio;
 $("stPause").onclick = () => {
   if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
   else if (paused) resumeSession();
+  else if (phase === "preview") gotoRecording();
   else pauseSession();
 };
 $("stPrev").onclick = prevLine;
@@ -1007,13 +1032,15 @@ $("scrubber").oninput = (e) => {
 };
 $("scrubber").onchange = () => { afterNav(); };
 
+// View toggle (stacked ⇄ overlay)
+$("stViewBtn").onclick = () => { settings.overlay = !settings.overlay; saveSettings(); applyView(); };
+
 // Reference video
 const videoInput = $("videoInput");
 $("stVideoBtn").onclick = () => videoInput.click();
 $("videoLoadBtn").onclick = () => videoInput.click();
 videoInput.onchange = () => { if (videoInput.files[0]) loadVideo(videoInput.files[0]); videoInput.value = ""; };
 
-$("setPrep").oninput = (e) => { settings.prep = +e.target.value; $("setPrepV").textContent = settings.prep; saveSettings(); };
 $("setSilence").oninput = (e) => { settings.silence = +e.target.value; $("setSilenceV").textContent = settings.silence.toFixed(1); saveSettings(); };
 $("setSens").oninput = (e) => { settings.sens = +e.target.value; $("setSensV").textContent = settings.sens; saveSettings(); };
 
@@ -1024,7 +1051,7 @@ document.addEventListener("keydown", (e) => {
     if (tag === "BUTTON") e.target.blur(); // avoid double-trigger on a focused button
     e.preventDefault();
     if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
-    else if (phase === "prep") gotoRecording();
+    else if (phase === "preview") gotoRecording();
     else if (phase === "recording") stopRecording();
     else if (phase === "paused") resumeSession();
   } else if (e.code === "ArrowRight" || e.code === "ArrowDown") { e.preventDefault(); skipLine(); }
