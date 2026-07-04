@@ -281,6 +281,18 @@
         <input type="checkbox" id="setAutoNext">
         Auto-advance to next line
       </label>
+      <label class="chk">
+        <input type="checkbox" id="setTrim">
+        Trim silence from takes
+      </label>
+      <label class="chk">
+        <input type="checkbox" id="setMix">
+        Mix original audio (music)
+      </label>
+      <label>Music under voice
+        <input type="range" id="setDuck" min="0" max="0.6" step="0.05">
+        <b><span id="setDuckV"></span>%</b>
+      </label>
     </div>
   </div>
 </div>
@@ -303,7 +315,7 @@ let srtName = "";
 let db = null;
 
 /* Studio session state */
-const settings = { silence: 1.5, sens: 5, overlay: false, autoNext: true };
+const settings = { silence: 1.5, sens: 5, overlay: false, autoNext: true, trimSilence: true, mixOriginal: false, duck: 0.12 };
 let studioOn = false;
 let stIndex = 0;
 let phase = "idle";    // idle | prep | recording | saving | paused | done
@@ -319,6 +331,8 @@ let rafHandle = null;
 let studioAudio = null;
 let playingIndex = -1;
 let videoUrl = null;
+let videoFile = null;       // the loaded movie File (for decoding original audio on export)
+let origAudioBuf = null;    // cached decoded original audio
 let videoReady = false;
 let videoStopAt = Infinity; // pause playback at this time (the current line's end)
 let dubbing = false;        // "preview dub" mode: video + recorded takes in sync
@@ -353,7 +367,7 @@ const idbDel = (s, k) => new Promise((res, rej) => { const t = db.transaction(s,
 const idbClear = (s) => new Promise((res, rej) => { const t = db.transaction(s, "readwrite").objectStore(s).clear(); t.onsuccess = () => res(); t.onerror = () => rej(t.error); });
 
 async function saveState() { await idbPut("state", "project", { language, srtName, cues, savedAt: Date.now() }); }
-async function saveClip(i, blob, duration) { await idbPut("clips", i, { blob, duration }); }
+async function saveClip(i, blob, meta) { await idbPut("clips", i, Object.assign({ blob }, meta)); }
 
 /* ================= SRT ================= */
 function parseTime(t) {
@@ -399,14 +413,50 @@ const $ = (id) => document.getElementById(id);
 let toastTimer = null;
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2200); }
 const windowDur = (c) => Math.max(0.01, c.end - c.start);
-/* Room a take can occupy at normal pace: from this line's start up to the NEXT line's start
-   (the subtitle window PLUS the gap/buffer after it). Last line is unbounded. */
-function cueRoom(c) {
-  const next = cues[c.index + 1];
-  return next ? Math.max(0.05, next.start - c.start) : Infinity;
+
+const MAX_DELAY = 5;   // a recorded line may be pushed at most this many seconds past its subtitle time
+const SILENCE_DB = 0.008;  // RMS threshold for silence trimming (high-quality mic => low noise floor)
+
+/* Effective (post-trim) playback bounds of a take, in the clip's own seconds. */
+function trimBounds(i) {
+  const m = clipMeta[i] || {};
+  if (settings.trimSilence !== false && m.trimEnd != null) return { start: m.trimStart || 0, end: m.trimEnd };
+  const full = (m.rawDuration != null ? m.rawDuration : (m.duration || 0));
+  return { start: 0, end: full };
 }
-/* Playback rate for a take: 1 (normal) unless it can't fit even with the buffer, then compress. */
-function rateFor(c, dur) { const room = cueRoom(c); return dur > room ? dur / room : 1; }
+function effDur(i) { const b = trimBounds(i); return Math.max(0.01, b.end - b.start); }
+
+/* Cached placement of every recorded take on the final timeline.
+   Takes play at NORMAL pace and may push the next line later; they only get compressed
+   if they'd delay the next RECORDED line by more than MAX_DELAY seconds. */
+let PLACE = {};
+function refreshPlacements() {
+  const place = {};
+  let cursor = 0;
+  const rec = cues.filter(c => clips[c.index]);
+  for (let k = 0; k < rec.length; k++) {
+    const c = rec[k];
+    const tb = trimBounds(c.index);
+    const dur = Math.max(0.01, tb.end - tb.start);
+    const start = Math.max(c.start, cursor);        // never overlap the previous take
+    let rate = 1, placed = dur;
+    const next = rec[k + 1];
+    if (next) {
+      const limit = next.start + MAX_DELAY;         // must end by next line's time + 5s
+      if (start + dur > limit) { const avail = Math.max(0.05, limit - start); rate = dur / avail; placed = avail; }
+    }
+    place[c.index] = { start, rate, dur, placed, end: start + placed, delay: start - c.start, trimStart: tb.start, trimEnd: tb.end };
+    cursor = start + placed;
+  }
+  PLACE = place;
+}
+function placementLabel(i) {
+  const p = PLACE[i];
+  if (!p) return effDur(i).toFixed(1) + "s";
+  if (p.rate > 1.001) return `${p.dur.toFixed(1)}s → sped ×${p.rate.toFixed(2)}`;
+  if (p.delay > 0.1) return `${p.dur.toFixed(1)}s · +${p.delay.toFixed(1)}s late (normal pace)`;
+  return `${p.dur.toFixed(1)}s (normal pace)`;
+}
 
 function updateProgress() {
   const done = Object.keys(clips).length;
@@ -450,26 +500,32 @@ function renderRowControls(i) {
     play.onclick = () => playClip(i); ctrls.appendChild(play);
     const del = document.createElement("button"); del.className = "ghost"; del.textContent = "🗑";
     del.title = "Delete recording"; del.onclick = () => deleteClip(i); ctrls.appendChild(del);
-    const dur = clipMeta[i] ? clipMeta[i].duration : null;
     const meta = document.createElement("span"); meta.className = "meta";
-    if (dur != null) {
-      const room = cueRoom(c);
-      if (dur > room) { meta.className = "meta warn"; meta.textContent = `${dur.toFixed(1)}s → sped ×${(dur / room).toFixed(2)} to fit ${room.toFixed(1)}s before next line`; }
-      else meta.textContent = `${dur.toFixed(1)}s (normal pace)`;
-    }
+    meta.textContent = placementLabel(i);
+    if (PLACE[i] && PLACE[i].rate > 1.001) meta.className = "meta warn";
     ctrls.appendChild(meta);
   }
 }
 
 /* ================= Playback (list) ================= */
 let listAudio = null;
-function playClip(i) { if (listAudio) listAudio.pause(); const u = URL.createObjectURL(clips[i]); listAudio = new Audio(u); listAudio.onended = () => URL.revokeObjectURL(u); listAudio.play(); }
+function playClip(i) {
+  if (listAudio) listAudio.pause();
+  const u = URL.createObjectURL(clips[i]);
+  const a = new Audio(u); listAudio = a;
+  const tb = trimBounds(i);
+  a.onloadedmetadata = () => { try { a.currentTime = tb.start; } catch (e) {} };
+  a.ontimeupdate = () => { if (a.currentTime >= tb.end) { a.pause(); a.ontimeupdate = null; } };
+  a.onended = () => URL.revokeObjectURL(u);
+  a.play();
+}
 async function deleteClip(i) {
   delete clips[i]; delete clipMeta[i];
   await idbDel("clips", i); await saveState();
+  refreshPlacements();
   const row = $("row-" + i); if (row) row.classList.remove("done");
   const dot = $("dot-" + i); if (dot) dot.classList.remove("done");
-  renderRowControls(i); updateProgress();
+  renderList(); updateProgress();
 }
 
 /* ================= Studio ================= */
@@ -481,6 +537,7 @@ function openStudio(startIndex) {
   studioOn = true; paused = false;
   $("studio").classList.add("on");
   setupScrubber();
+  refreshPlacements();
   renderRecList();
   startWaveLoop();
   gotoIdle();
@@ -578,7 +635,6 @@ function renderRecList() {
   box.innerHTML = "";
   for (const c of recorded) {
     const i = c.index;
-    const dur = clipMeta[i] ? clipMeta[i].duration : 0;
     const item = document.createElement("div");
     item.className = "rec-item" + (i === stIndex ? " current" : "") + (i === playingIndex ? " playing" : "");
     item.dataset.i = i;
@@ -586,7 +642,7 @@ function renderRecList() {
       `<div class="rec-num">#${i + 1}</div>
        <div class="rec-body">
          <div class="rec-text">${escapeHtml(c.text) || "(no text)"}</div>
-         <div class="rec-meta">${fmtTime(c.start)} · ${dur.toFixed(1)}s</div>
+         <div class="rec-meta">${fmtTime(c.start)} · ${placementLabel(i)}</div>
        </div>
        <button class="rec-play ghost" title="Listen">${i === playingIndex ? "⏸" : "▶"}</button>
        <button class="rec-del ghost" title="Delete">🗑</button>`;
@@ -637,6 +693,9 @@ function toggleStudioPlay(i) {
   const url = URL.createObjectURL(clips[i]);
   const a = new Audio(url);
   studioAudio = a; playingIndex = i;
+  const tb = trimBounds(i);
+  a.onloadedmetadata = () => { try { a.currentTime = tb.start; } catch (e) {} };
+  a.ontimeupdate = () => { if (a.currentTime >= tb.end) { a.pause(); a.ontimeupdate = null; a.onended && a.onended(); } };
   a.onended = a.onerror = () => { URL.revokeObjectURL(url); if (studioAudio === a) { studioAudio = null; playingIndex = -1; renderRecList(); } };
   a.play();
   renderRecList();
@@ -646,6 +705,7 @@ async function studioDelete(i) {
   if (playingIndex === i) stopStudioPlay();
   delete clips[i]; delete clipMeta[i];
   await idbDel("clips", i); await saveState();
+  refreshPlacements();
   renderRecList(); updateProgress();
   if (i === stIndex) showCurrentLine();
 }
@@ -655,6 +715,8 @@ function loadVideo(file) {
   if (!file) return;
   const v = $("video");
   if (videoUrl) URL.revokeObjectURL(videoUrl);
+  videoFile = file;
+  origAudioBuf = null; // invalidate cached decoded audio
   videoUrl = URL.createObjectURL(file);
   v.src = videoUrl;
   v.muted = true;              // start muted to avoid mic bleed; unmute for headphones
@@ -683,16 +745,15 @@ function playVideo(muted) {
 function pauseVideo() { const v = $("video"); if (videoReady) { try { v.pause(); } catch (e) {} } }
 
 /* ---- Preview dub: play the video (muted) with recorded takes in sync ---- */
-function clipRate(c) { const m = clipMeta[c.index]; return m ? rateFor(c, m.duration) : 1; }
-function placedDur(c) { const m = clipMeta[c.index]; return m ? m.duration / clipRate(c) : 0; }
-
 function startDubPreview() {
   if (!videoReady) { toast("Load the video first (🎬 Video)."); return; }
   if (!Object.keys(clips).length) { toast("No recordings to preview yet."); return; }
   cancelRecorder(); stopStudioPlay();
+  refreshPlacements();
   dubbing = true; dubActive = -1; phase = "dub";
   const v = $("video");
-  v.muted = true;
+  v.muted = !settings.mixOriginal;   // keep original audio (ducked) if mixing, else silent
+  v.volume = 1;
   videoStopAt = Infinity;
   const c = cues[stIndex];
   try { v.currentTime = c ? c.start : 0; } catch (e) {}
@@ -706,6 +767,7 @@ function stopDubPreview() {
   dubbing = false;
   stopDubClip();
   pauseVideo();
+  const v = $("video"); if (v) v.volume = 1;
   afterNav();
 }
 /* Called every frame while dubbing to keep takes in sync with the video clock. */
@@ -715,26 +777,26 @@ function dubTick() {
   const t = v.currentTime;
   let idx = -1, cur = null;
   for (const c of cues) {
-    if (!clips[c.index]) continue;
-    const pd = placedDur(c);
-    if (t >= c.start && t < c.start + pd) { idx = c.index; cur = c; break; }
+    const p = PLACE[c.index]; if (!p) continue;
+    if (t >= p.start && t < p.end) { idx = c.index; cur = p; break; }
   }
+  // duck the original audio under the current take when mixing
+  if (settings.mixOriginal && !v.muted) v.volume = idx >= 0 ? (settings.duck != null ? settings.duck : 0.12) : 1;
   if (idx !== dubActive) {
     stopDubClip();
     dubActive = idx;
     if (cur) {
-      const rate = clipRate(cur);
       const url = URL.createObjectURL(clips[idx]);
       const a = new Audio(url);
-      a.playbackRate = rate;
+      a.playbackRate = cur.rate;
       a.onended = a.onerror = () => URL.revokeObjectURL(url);
-      try { a.currentTime = Math.max(0, (t - cur.start) * rate); } catch (e) {}
+      try { a.currentTime = cur.trimStart + Math.max(0, (t - cur.start) * cur.rate); } catch (e) {}
       a.play().catch(() => {});
       dubAudio = a;
     }
   } else if (cur && dubAudio) {
     // correct drift if the user scrubbed the video
-    const expected = (t - cur.start) * clipRate(cur);
+    const expected = cur.trimStart + (t - cur.start) * cur.rate;
     if (Math.abs(dubAudio.currentTime - expected) > 0.3) { try { dubAudio.currentTime = Math.max(0, expected); } catch (e) {} }
   }
 }
@@ -795,15 +857,13 @@ async function onRecStop() {
   const blob = new Blob(recChunks, { type: (mediaRecorder && mediaRecorder.mimeType) || "audio/webm" });
   mediaRecorder = null;
   const i = stIndex;
-  const duration = await getBlobDuration(blob);
-  clips[i] = blob; clipMeta[i] = { duration };
-  try { await saveClip(i, blob, duration); await saveState(); } catch (e) { toast("Save failed: " + e.message); }
+  const meta = await analyzeClip(blob);          // { rawDuration, trimStart, trimEnd }
+  clips[i] = blob; clipMeta[i] = meta;
+  try { await saveClip(i, blob, meta); await saveState(); } catch (e) { toast("Save failed: " + e.message); }
+  refreshPlacements();
   renderRecList();
   setStatus('<span class="saved">✓ SAVED</span>');
-  const c = cues[i], room = cueRoom(c);
-  $("stHint").textContent = duration > room
-    ? `Take ${duration.toFixed(1)}s — sped ×${(duration / room).toFixed(2)} to fit before next line`
-    : `Take ${duration.toFixed(1)}s — normal pace`;
+  $("stHint").textContent = "Take saved · " + placementLabel(i);
   // advance shortly
   setTimeout(() => {
     if (!studioOn) return;
@@ -962,7 +1022,32 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-/* ================= Duration measure ================= */
+/* ================= Duration + silence analysis ================= */
+/* Decode a take and find where real speech starts/ends, so leading/trailing silence is trimmed. */
+async function analyzeClip(blob) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    ctx.close();
+    const data = buf.getChannelData(0), sr = buf.sampleRate, raw = buf.duration;
+    const win = Math.max(1, Math.floor(sr * 0.02));  // 20ms windows
+    let firstS = -1, lastS = -1;
+    for (let i = 0; i < data.length; i += win) {
+      const n = Math.min(win, data.length - i);
+      let s = 0; for (let j = 0; j < n; j++) { const v = data[i + j]; s += v * v; }
+      if (Math.sqrt(s / n) > SILENCE_DB) { if (firstS < 0) firstS = i; lastS = i + n; }
+    }
+    if (firstS < 0) return { rawDuration: raw, trimStart: 0, trimEnd: raw }; // all silence — keep as-is
+    const pad = Math.floor(sr * 0.06); // 60ms breathing room so words aren't clipped
+    const trimStart = Math.max(0, (firstS - pad)) / sr;
+    const trimEnd = Math.min(data.length, (lastS + pad)) / sr;
+    return { rawDuration: raw, trimStart, trimEnd };
+  } catch (e) {
+    const d = await getBlobDuration(blob);
+    return { rawDuration: d, trimStart: 0, trimEnd: d };
+  }
+}
+
 function getBlobDuration(blob) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob);
@@ -986,34 +1071,60 @@ async function exportAudio() {
   if (typeof lamejs === "undefined") { toast("MP3 encoder not loaded (lame.min.js missing)."); return; }
   if (!Object.keys(clips).length) { toast("Nothing recorded yet."); return; }
   exporting = true;
+  refreshPlacements();
+  const merge = settings.mixOriginal && videoReady && videoFile;
   const btn = $("exportBtn"); const orig = btn.textContent; btn.disabled = true; btn.textContent = "Rendering…";
-  toast("Rendering timeline…");
+  toast(merge ? "Rendering dub over original audio…" : "Rendering timeline…");
   try {
-    // Use 44.1kHz for rendering; LAME accepts it directly.
     const SR = 44100;
     const dctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Decode the recorded takes.
     const decoded = {};
     for (const i of Object.keys(clips)) {
       try { decoded[i] = await dctx.decodeAudioData((await clips[i].arrayBuffer()).slice(0)); } catch (e) { console.warn("decode fail", i, e); }
     }
+
+    // Optionally decode the movie's original audio (music/effects bed).
+    let origBuf = null;
+    if (merge) {
+      btn.textContent = "Reading original audio…";
+      try {
+        if (!origAudioBuf) origAudioBuf = await dctx.decodeAudioData(await videoFile.arrayBuffer());
+        origBuf = origAudioBuf;
+      } catch (e) {
+        console.warn("original audio decode failed", e);
+        toast("Couldn't decode this video's audio — exporting voice only.");
+      }
+    }
     dctx.close();
 
     let total = 0;
-    for (const c of cues) {
-      const buf = decoded[c.index];
-      let placed = 0;
-      if (buf) placed = buf.duration / rateFor(c, buf.duration); // normal pace unless compressed
-      total = Math.max(total, c.end, c.start + placed);
-    }
+    for (const c of cues) { const p = PLACE[c.index]; if (p) total = Math.max(total, p.end); total = Math.max(total, c.end); }
+    if (origBuf) total = Math.max(total, origBuf.duration);
     total = Math.max(total, 0.1) + 0.2;
 
-    const off = new OfflineAudioContext(1, Math.ceil(total * SR), SR);
+    const channels = origBuf ? Math.min(2, origBuf.numberOfChannels) : 1;
+    const off = new OfflineAudioContext(channels, Math.ceil(total * SR), SR);
+
+    // Original audio bed, ducked under each recorded take so your voice replaces the dialogue.
+    if (origBuf) {
+      const bed = off.createBufferSource(); bed.buffer = origBuf;
+      const duckGain = off.createGain();
+      buildDuckAutomation(duckGain.gain, off);
+      bed.connect(duckGain).connect(off.destination);
+      bed.start(0);
+    }
+
+    // Recorded takes on top (with trim + placement).
     for (const c of cues) {
       const buf = decoded[c.index]; if (!buf) continue;
-      const rate = rateFor(c, buf.duration);
+      const p = PLACE[c.index]; if (!p) continue;
       const s = off.createBufferSource(); s.buffer = buf;
-      if (rate !== 1) s.playbackRate.value = rate; // compress only if it would hit the next line
-      s.connect(off.destination); s.start(c.start);
+      if (p.rate !== 1) s.playbackRate.value = p.rate;
+      s.connect(off.destination);
+      const dur = Math.max(0.01, p.trimEnd - p.trimStart);
+      try { s.start(p.start, p.trimStart, dur); } catch (e) { s.start(p.start); }
     }
     const rendered = await off.startRendering();
 
@@ -1023,7 +1134,7 @@ async function exportAudio() {
 
     const base = (srtName || "dub").replace(/\.srt$/i, "");
     const langPart = language ? "." + language.trim().toLowerCase().replace(/\s+/g, "-") : "";
-    const fname = base + langPart + ".mp3";
+    const fname = base + langPart + (origBuf ? ".mixed" : "") + ".mp3";
     const url = URL.createObjectURL(blob);
     const a = $("downloader"); a.href = url; a.download = fname; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 6000);
@@ -1032,23 +1143,49 @@ async function exportAudio() {
   finally { btn.textContent = orig; btn.disabled = false; exporting = false; }
 }
 
-/* Encode a mono AudioBuffer to an MP3 Blob using lamejs. Yields to the UI so it can't freeze. */
+/* Duck the original audio down under every recorded take so your voice replaces the dialogue,
+   while music/effects stay at full level everywhere else. */
+function buildDuckAutomation(param) {
+  const duck = (settings.duck != null ? settings.duck : 0.12);
+  param.setValueAtTime(1, 0);
+  const spans = Object.keys(PLACE).map(k => [PLACE[k].start, PLACE[k].end]).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const s of spans) {
+    const last = merged[merged.length - 1];
+    if (last && s[0] <= last[1] + 0.3) last[1] = Math.max(last[1], s[1]);
+    else merged.push([s[0], s[1]]);
+  }
+  const R = 0.06, U = 0.15; // ramp down / up (seconds) to avoid clicks
+  for (const [s, e] of merged) {
+    param.setValueAtTime(1, Math.max(0, s - R));
+    param.linearRampToValueAtTime(duck, s);
+    param.setValueAtTime(duck, e);
+    param.linearRampToValueAtTime(1, e + U);
+  }
+}
+
+/* Encode a mono/stereo AudioBuffer to an MP3 Blob using lamejs. Yields to the UI so it can't freeze. */
 function audioBufferToMp3Blob(buffer, kbps, onProgress) {
   return new Promise((resolve) => {
     const sr = buffer.sampleRate;
-    const ch = buffer.getChannelData(0);
-    const enc = new lamejs.Mp3Encoder(1, sr, kbps);
+    const stereo = buffer.numberOfChannels >= 2;
+    const L = buffer.getChannelData(0);
+    const R = stereo ? buffer.getChannelData(1) : null;
+    const enc = new lamejs.Mp3Encoder(stereo ? 2 : 1, sr, kbps);
     const block = 1152;
-    const samples = new Int16Array(block);
+    const lBuf = new Int16Array(block), rBuf = new Int16Array(block);
     const parts = [];
     let i = 0;
-    const len = ch.length;
+    const len = L.length;
+    const to16 = (v) => { v = Math.max(-1, Math.min(1, v)); return v < 0 ? v * 0x8000 : v * 0x7fff; };
     function step() {
       const deadline = performance.now() + 40; // work ~40ms then yield
       while (i < len && performance.now() < deadline) {
         const n = Math.min(block, len - i);
-        for (let j = 0; j < n; j++) { const s = Math.max(-1, Math.min(1, ch[i + j])); samples[j] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-        const chunk = enc.encodeBuffer(n === block ? samples : samples.subarray(0, n));
+        for (let j = 0; j < n; j++) { lBuf[j] = to16(L[i + j]); if (stereo) rBuf[j] = to16(R[i + j]); }
+        const lo = n === block ? lBuf : lBuf.subarray(0, n);
+        const ro = n === block ? rBuf : rBuf.subarray(0, n);
+        const chunk = stereo ? enc.encodeBuffer(lo, ro) : enc.encodeBuffer(lo);
         if (chunk.length) parts.push(new Int8Array(chunk));
         i += n;
       }
@@ -1068,7 +1205,7 @@ async function loadSRTText(text, name) {
   const parsed = parseSRT(text);
   if (!parsed.length) { toast("No subtitles found in that file."); return; }
   cues = parsed; srtName = name;
-  clips = {}; clipMeta = {}; await idbClear("clips");
+  clips = {}; clipMeta = {}; PLACE = {}; await idbClear("clips");
   if (!language) await promptLanguage();
   await saveState(); showEditor();
   openStudio(); // studio is the default experience
@@ -1093,6 +1230,9 @@ function loadSettings() {
   $("setSilence").value = settings.silence; $("setSilenceV").textContent = settings.silence.toFixed(1);
   $("setSens").value = settings.sens; $("setSensV").textContent = settings.sens;
   $("setAutoNext").checked = settings.autoNext !== false;
+  $("setTrim").checked = settings.trimSilence !== false;
+  $("setMix").checked = !!settings.mixOriginal;
+  $("setDuck").value = settings.duck; $("setDuckV").textContent = Math.round(settings.duck * 100);
   applyView();
 }
 function applyView() {
@@ -1155,6 +1295,9 @@ videoInput.onchange = () => { if (videoInput.files[0]) loadVideo(videoInput.file
 $("setSilence").oninput = (e) => { settings.silence = +e.target.value; $("setSilenceV").textContent = settings.silence.toFixed(1); saveSettings(); };
 $("setSens").oninput = (e) => { settings.sens = +e.target.value; $("setSensV").textContent = settings.sens; saveSettings(); };
 $("setAutoNext").onchange = (e) => { settings.autoNext = e.target.checked; saveSettings(); };
+$("setTrim").onchange = (e) => { settings.trimSilence = e.target.checked; saveSettings(); refreshPlacements(); renderRecList(); if (studioOn) showCurrentLine(); };
+$("setMix").onchange = (e) => { settings.mixOriginal = e.target.checked; saveSettings(); };
+$("setDuck").oninput = (e) => { settings.duck = +e.target.value; $("setDuckV").textContent = Math.round(settings.duck * 100); saveSettings(); };
 
 document.addEventListener("keydown", (e) => {
   if (!studioOn) return;
@@ -1180,7 +1323,14 @@ document.addEventListener("keydown", (e) => {
     const st = await idbGet("state", "project");
     if (st && st.cues && st.cues.length) {
       cues = st.cues; language = st.language || ""; srtName = st.srtName || "";
-      for (const c of cues) { const rec = await idbGet("clips", c.index); if (rec && rec.blob) { clips[c.index] = rec.blob; clipMeta[c.index] = { duration: rec.duration }; } }
+      for (const c of cues) {
+        const rec = await idbGet("clips", c.index);
+        if (rec && rec.blob) {
+          clips[c.index] = rec.blob;
+          clipMeta[c.index] = { rawDuration: (rec.rawDuration != null ? rec.rawDuration : rec.duration), trimStart: rec.trimStart, trimEnd: rec.trimEnd };
+        }
+      }
+      refreshPlacements();
       showEditor(); openStudio(); toast("Restored your saved project.");
     }
   } catch (e) { console.error("boot", e); }
