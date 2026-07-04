@@ -822,10 +822,14 @@ function tick() {
 
   drawWave(rms);
 
-  // Stop reference-video playback at the current line's end so it doesn't run into the next scene.
-  if (videoReady && (phase === "preview" || phase === "recording") && videoStopAt < Infinity) {
+  // Reference-video boundary at the current line's end.
+  if (videoReady && videoStopAt < Infinity) {
     const v = $("video");
-    if (!v.paused && v.currentTime >= videoStopAt) v.pause();
+    const c = cues[stIndex];
+    if (!v.paused && v.currentTime >= videoStopAt) {
+      if (phase === "preview" && c) v.currentTime = c.start; // loop the line's window while you watch
+      else if (phase === "recording") v.pause();             // play once, then freeze while recording
+    }
   }
 
   const now = performance.now();
