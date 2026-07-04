@@ -224,6 +224,7 @@
     <button id="stList" class="ghost">☰ List</button>
     <button id="stExportTop" class="ghost">⤓ Export</button>
     <button id="stVideoBtn" class="ghost">🎬 Video</button>
+    <button id="stDubBtn" class="ghost">▶ Preview dub</button>
     <button id="stViewBtn" class="ghost">⧉ Overlay view</button>
     <div class="spacer"></div>
     <span class="st-count" id="stCount"></span>
@@ -320,6 +321,9 @@ let playingIndex = -1;
 let videoUrl = null;
 let videoReady = false;
 let videoStopAt = Infinity; // pause playback at this time (the current line's end)
+let dubbing = false;        // "preview dub" mode: video + recorded takes in sync
+let dubAudio = null;
+let dubActive = -1;
 
 let mediaRecorder = null;
 let recChunks = [];
@@ -515,7 +519,8 @@ function gotoIdle() {
 
 function updatePrimaryBtn() {
   const b = $("stPause");
-  if (phase === "idle" || phase === "done" || phase === "seeking") b.textContent = "▶ Start";
+  if (phase === "dub") b.textContent = "⏹ Stop preview";
+  else if (phase === "idle" || phase === "done" || phase === "seeking") b.textContent = "▶ Start";
   else if (paused) b.textContent = "▶ Resume";
   else if (phase === "preview") b.textContent = "● Record";
   else b.textContent = "⏸ Pause";
@@ -526,6 +531,7 @@ function closeStudio() {
   stopRAF();
   cancelRecorder();
   stopStudioPlay();
+  dubbing = false; stopDubClip();
   pauseVideo();
   if (micSource) { try { micSource.disconnect(); } catch (e) {} micSource = null; }
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
@@ -595,6 +601,7 @@ function highlightCurrentRec() {
 
 /* Jump to a recorded line — pause there so it isn't recorded over by accident. */
 function jumpToLine(i) {
+  if (dubbing) { dubbing = false; stopDubClip(); pauseVideo(); }
   cancelRecorder();
   stIndex = i;
   if (sessionLive()) {
@@ -615,6 +622,7 @@ function stopStudioPlay() {
   playingIndex = -1;
 }
 function toggleStudioPlay(i) {
+  if (dubbing) { dubbing = false; stopDubClip(); pauseVideo(); }
   const wasPlaying = playingIndex === i;
   stopStudioPlay();
   if (wasPlaying) { renderRecList(); return; }
@@ -665,6 +673,63 @@ function playVideo(muted) {
   if (p && p.catch) p.catch(() => {});
 }
 function pauseVideo() { const v = $("video"); if (videoReady) { try { v.pause(); } catch (e) {} } }
+
+/* ---- Preview dub: play the video (muted) with recorded takes in sync ---- */
+function placedDur(c) { const m = clipMeta[c.index]; if (!m) return 0; return Math.min(m.duration, windowDur(c)); }
+function clipRate(c) { const m = clipMeta[c.index]; if (!m) return 1; const w = windowDur(c); return m.duration > w ? m.duration / w : 1; }
+
+function startDubPreview() {
+  if (!videoReady) { toast("Load the video first (🎬 Video)."); return; }
+  if (!Object.keys(clips).length) { toast("No recordings to preview yet."); return; }
+  cancelRecorder(); stopStudioPlay();
+  dubbing = true; dubActive = -1; phase = "dub";
+  const v = $("video");
+  v.muted = true;
+  videoStopAt = Infinity;
+  const c = cues[stIndex];
+  try { v.currentTime = c ? c.start : 0; } catch (e) {}
+  v.play().catch(() => {});
+  setStatus('<span class="rec">▶ DUB PREVIEW</span>');
+  $("stHint").textContent = "Video + your recordings playing in sync · SPACE / Stop to end";
+  updatePrimaryBtn();
+}
+function stopDubClip() { if (dubAudio) { try { dubAudio.pause(); } catch (e) {} dubAudio = null; } dubActive = -1; }
+function stopDubPreview() {
+  dubbing = false;
+  stopDubClip();
+  pauseVideo();
+  afterNav();
+}
+/* Called every frame while dubbing to keep takes in sync with the video clock. */
+function dubTick() {
+  const v = $("video");
+  if (v.ended) { stopDubPreview(); return; }
+  const t = v.currentTime;
+  let idx = -1, cur = null;
+  for (const c of cues) {
+    if (!clips[c.index]) continue;
+    const pd = placedDur(c);
+    if (t >= c.start && t < c.start + pd) { idx = c.index; cur = c; break; }
+  }
+  if (idx !== dubActive) {
+    stopDubClip();
+    dubActive = idx;
+    if (cur) {
+      const rate = clipRate(cur);
+      const url = URL.createObjectURL(clips[idx]);
+      const a = new Audio(url);
+      a.playbackRate = rate;
+      a.onended = a.onerror = () => URL.revokeObjectURL(url);
+      try { a.currentTime = Math.max(0, (t - cur.start) * rate); } catch (e) {}
+      a.play().catch(() => {});
+      dubAudio = a;
+    }
+  } else if (cur && dubAudio) {
+    // correct drift if the user scrubbed the video
+    const expected = (t - cur.start) * clipRate(cur);
+    if (Math.abs(dubAudio.currentTime - expected) > 0.3) { try { dubAudio.currentTime = Math.max(0, expected); } catch (e) {} }
+  }
+}
 
 /* ---- PREVIEW phase: watch the scene WITH sound, then hotkey to record ---- */
 function gotoPreview() {
@@ -821,6 +886,8 @@ function tick() {
   document.documentElement.style.setProperty("--glow", (phase === "recording" ? glow : glow * 0.3).toFixed(3));
 
   drawWave(rms);
+
+  if (dubbing) dubTick();
 
   // Reference-video boundary at the current line's end.
   if (videoReady && videoStopAt < Infinity) {
@@ -1043,17 +1110,20 @@ $("changeSrtBtn").onclick = () => { if (Object.keys(clips).length && !confirm("L
 $("stList").onclick = closeStudio;
 $("stExportTop").onclick = exportAudio;
 $("stPause").onclick = () => {
-  if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
+  if (phase === "dub") stopDubPreview();
+  else if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
   else if (paused) resumeSession();
   else if (phase === "preview") gotoRecording();
   else pauseSession();
 };
+$("stDubBtn").onclick = () => { if (dubbing) stopDubPreview(); else startDubPreview(); };
 $("stPrev").onclick = prevLine;
 $("stSkip").onclick = skipLine;
 $("stRedo").onclick = redoLine;
 
 // Scrubber: slide to preview any line; release to set start point.
 $("scrubber").oninput = (e) => {
+  if (dubbing) stopDubPreview();
   cancelRecorder();
   stIndex = +e.target.value;
   phase = "seeking";
@@ -1084,12 +1154,13 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     if (tag === "BUTTON") e.target.blur(); // avoid double-trigger on a focused button
     e.preventDefault();
-    if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
+    if (phase === "dub") stopDubPreview();
+    else if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
     else if (phase === "preview") gotoRecording();
     else if (phase === "recording") stopRecording();
     else if (phase === "paused") resumeSession();
-  } else if (e.code === "ArrowRight" || e.code === "ArrowDown") { e.preventDefault(); skipLine(); }
-  else if (e.code === "ArrowLeft" || e.code === "ArrowUp") { e.preventDefault(); prevLine(); }
+  } else if (!dubbing && (e.code === "ArrowRight" || e.code === "ArrowDown")) { e.preventDefault(); skipLine(); }
+  else if (!dubbing && (e.code === "ArrowLeft" || e.code === "ArrowUp")) { e.preventDefault(); prevLine(); }
   else if (e.code === "Escape") { e.preventDefault(); closeStudio(); }
 });
 
