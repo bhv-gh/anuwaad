@@ -236,7 +236,7 @@
         <div class="vemoji">🎬</div>
         <div>Load the movie to watch the scene as you record</div>
         <button id="videoLoadBtn" class="primary">Load video</button>
-        <div class="vnote">Stays on your machine · not uploaded · use headphones to hear the original while recording</div>
+        <div class="vnote">Stays on your machine · not uploaded · plays with sound so you can hear the scene, then mutes while you record</div>
       </div>
     </div>
     <div class="st-timecode" id="stTime"></div>
@@ -645,7 +645,7 @@ function loadVideo(file) {
   $("videoEmpty").style.display = "none";
   videoReady = true;
   v.onloadedmetadata = () => seekVideoToCurrent();
-  toast("Video loaded: " + file.name + " — unmute for sound (use headphones)");
+  toast("Video loaded: " + file.name);
 }
 function seekVideoToCurrent() {
   const v = $("video");
