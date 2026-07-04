@@ -399,6 +399,14 @@ const $ = (id) => document.getElementById(id);
 let toastTimer = null;
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2200); }
 const windowDur = (c) => Math.max(0.01, c.end - c.start);
+/* Room a take can occupy at normal pace: from this line's start up to the NEXT line's start
+   (the subtitle window PLUS the gap/buffer after it). Last line is unbounded. */
+function cueRoom(c) {
+  const next = cues[c.index + 1];
+  return next ? Math.max(0.05, next.start - c.start) : Infinity;
+}
+/* Playback rate for a take: 1 (normal) unless it can't fit even with the buffer, then compress. */
+function rateFor(c, dur) { const room = cueRoom(c); return dur > room ? dur / room : 1; }
 
 function updateProgress() {
   const done = Object.keys(clips).length;
@@ -445,9 +453,9 @@ function renderRowControls(i) {
     const dur = clipMeta[i] ? clipMeta[i].duration : null;
     const meta = document.createElement("span"); meta.className = "meta";
     if (dur != null) {
-      const w = windowDur(c);
-      if (dur > w) { meta.className = "meta warn"; meta.textContent = `${dur.toFixed(1)}s → sped ×${(dur / w).toFixed(2)} to fit ${w.toFixed(1)}s`; }
-      else meta.textContent = `${dur.toFixed(1)}s (fits, silence after)`;
+      const room = cueRoom(c);
+      if (dur > room) { meta.className = "meta warn"; meta.textContent = `${dur.toFixed(1)}s → sped ×${(dur / room).toFixed(2)} to fit ${room.toFixed(1)}s before next line`; }
+      else meta.textContent = `${dur.toFixed(1)}s (normal pace)`;
     }
     ctrls.appendChild(meta);
   }
@@ -675,8 +683,8 @@ function playVideo(muted) {
 function pauseVideo() { const v = $("video"); if (videoReady) { try { v.pause(); } catch (e) {} } }
 
 /* ---- Preview dub: play the video (muted) with recorded takes in sync ---- */
-function placedDur(c) { const m = clipMeta[c.index]; if (!m) return 0; return Math.min(m.duration, windowDur(c)); }
-function clipRate(c) { const m = clipMeta[c.index]; if (!m) return 1; const w = windowDur(c); return m.duration > w ? m.duration / w : 1; }
+function clipRate(c) { const m = clipMeta[c.index]; return m ? rateFor(c, m.duration) : 1; }
+function placedDur(c) { const m = clipMeta[c.index]; return m ? m.duration / clipRate(c) : 0; }
 
 function startDubPreview() {
   if (!videoReady) { toast("Load the video first (🎬 Video)."); return; }
@@ -792,10 +800,10 @@ async function onRecStop() {
   try { await saveClip(i, blob, duration); await saveState(); } catch (e) { toast("Save failed: " + e.message); }
   renderRecList();
   setStatus('<span class="saved">✓ SAVED</span>');
-  const c = cues[i], w = windowDur(c);
-  $("stHint").textContent = duration > w
-    ? `Take ${duration.toFixed(1)}s — will be sped ×${(duration / w).toFixed(2)} to fit`
-    : `Take ${duration.toFixed(1)}s — fits with silence after`;
+  const c = cues[i], room = cueRoom(c);
+  $("stHint").textContent = duration > room
+    ? `Take ${duration.toFixed(1)}s — sped ×${(duration / room).toFixed(2)} to fit before next line`
+    : `Take ${duration.toFixed(1)}s — normal pace`;
   // advance shortly
   setTimeout(() => {
     if (!studioOn) return;
@@ -992,9 +1000,9 @@ async function exportAudio() {
 
     let total = 0;
     for (const c of cues) {
-      const buf = decoded[c.index], w = windowDur(c);
-      let placed = w;
-      if (buf) placed = Math.min(buf.duration, w);
+      const buf = decoded[c.index];
+      let placed = 0;
+      if (buf) placed = buf.duration / rateFor(c, buf.duration); // normal pace unless compressed
       total = Math.max(total, c.end, c.start + placed);
     }
     total = Math.max(total, 0.1) + 0.2;
@@ -1002,9 +1010,9 @@ async function exportAudio() {
     const off = new OfflineAudioContext(1, Math.ceil(total * SR), SR);
     for (const c of cues) {
       const buf = decoded[c.index]; if (!buf) continue;
-      const w = windowDur(c);
+      const rate = rateFor(c, buf.duration);
       const s = off.createBufferSource(); s.buffer = buf;
-      if (buf.duration > w) s.playbackRate.value = buf.duration / w; // speed up to fit
+      if (rate !== 1) s.playbackRate.value = rate; // compress only if it would hit the next line
       s.connect(off.destination); s.start(c.start);
     }
     const rendered = await off.startRendering();
