@@ -596,8 +596,19 @@ async function onRecStop() {
     : `Take ${duration.toFixed(1)}s — fits with silence after`;
   // advance shortly
   setTimeout(() => {
-    if (!studioOn || paused) return;
-    if (stIndex + 1 < cues.length) { stIndex++; gotoPrep(); }
+    if (!studioOn) return;
+    const hasNext = stIndex + 1 < cues.length;
+    if (paused) {
+      // Save-and-pause: the take was kept; move to the next line but stay paused.
+      if (hasNext) stIndex++;
+      phase = "paused";
+      showCurrentLine();
+      setStatus('<span class="paused">⏸ PAUSED</span>');
+      $("stHint").textContent = "Saved · press Resume or SPACE to continue";
+      updatePrimaryBtn();
+      return;
+    }
+    if (hasNext) { stIndex++; gotoPrep(); }
     else gotoDone();
   }, 650);
 }
@@ -618,9 +629,16 @@ const sessionLive = () => !!(stream && audioCtx);
 function afterNav() { if (sessionLive() && !paused) gotoPrep(); else gotoIdle(); }
 
 function pauseSession() {
-  paused = true; phase = "paused";
-  cancelRecorder();
+  paused = true;
   $("stCountdown").style.display = "none";
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    // Keep the take so far, then pause (onRecStop finishes into the paused state).
+    setStatus('<span class="saved">✓ saving…</span>');
+    updatePrimaryBtn();
+    stopRecording();
+    return;
+  }
+  phase = "paused";
   setStatus('<span class="paused">⏸ PAUSED</span>');
   $("stHint").textContent = "Session paused · press Resume or SPACE";
   updatePrimaryBtn();
