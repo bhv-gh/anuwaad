@@ -122,7 +122,15 @@
   .st-top { display: flex; align-items: center; gap: 12px; padding: 16px 22px; }
   .st-top .spacer { flex: 1; }
   .st-count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .st-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 24px; text-align: center; gap: 18px; }
+  .st-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 24px; text-align: center; gap: 16px; overflow-y: auto; }
+  .st-video-wrap {
+    width: min(620px, 92vw); border-radius: 12px; overflow: hidden;
+    background: #000; border: 1px solid var(--border); flex-shrink: 0;
+  }
+  #video { display: block; width: 100%; max-height: 44vh; background: #000; }
+  .st-video-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--muted); padding: 26px 22px; font-size: 14px; }
+  .st-video-empty .vemoji { font-size: 34px; }
+  .st-video-empty .vnote { font-size: 11px; opacity: .75; max-width: 340px; line-height: 1.4; }
   .st-timecode { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: .5px; }
   .st-text {
     font-size: clamp(22px, 4.2vw, 44px); font-weight: 600; max-width: 900px;
@@ -195,11 +203,21 @@
   <div class="st-top">
     <button id="stList" class="ghost">☰ List</button>
     <button id="stExportTop" class="ghost">⤓ Export</button>
+    <button id="stVideoBtn" class="ghost">🎬 Video</button>
     <div class="spacer"></div>
     <span class="st-count" id="stCount"></span>
   </div>
   <div class="st-body">
   <div class="st-mid">
+    <div class="st-video-wrap" id="videoWrap">
+      <video id="video" playsinline controls style="display:none"></video>
+      <div class="st-video-empty" id="videoEmpty">
+        <div class="vemoji">🎬</div>
+        <div>Load the movie to watch the scene as you record</div>
+        <button id="videoLoadBtn" class="primary">Load video</button>
+        <div class="vnote">Stays on your machine · not uploaded · use headphones to hear the original while recording</div>
+      </div>
+    </div>
     <div class="st-timecode" id="stTime"></div>
     <div class="st-text" id="stText"></div>
     <div class="st-status" id="stStatus"></div>
@@ -247,6 +265,7 @@
 
 <div class="toast" id="toast"></div>
 <a class="hidden-dl" id="downloader"></a>
+<input type="file" id="videoInput" accept="video/*" style="display:none">
 
 <script src="lame.min.js"></script>
 <script>
@@ -277,6 +296,8 @@ let rafHandle = null;
 
 let studioAudio = null;
 let playingIndex = -1;
+let videoUrl = null;
+let videoReady = false;
 
 let mediaRecorder = null;
 let recChunks = [];
@@ -461,6 +482,7 @@ function setupScrubber() {
 function gotoIdle() {
   phase = "idle"; paused = false;
   cancelRecorder();
+  pauseVideo();
   $("stCountdown").style.display = "none";
   showCurrentLine();
   setStatus('<span class="paused">READY</span>');
@@ -481,6 +503,7 @@ function closeStudio() {
   stopRAF();
   cancelRecorder();
   stopStudioPlay();
+  pauseVideo();
   if (micSource) { try { micSource.disconnect(); } catch (e) {} micSource = null; }
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -503,6 +526,7 @@ function showCurrentLine() {
   st.textContent = clips[stIndex] ? "✓ recorded" : "· not yet";
   st.style.color = clips[stIndex] ? "var(--ok)" : "";
   highlightCurrentRec();
+  if (phase !== "recording") seekVideoToCurrent();
 }
 
 /* ---- Recordings panel (right side) ---- */
@@ -587,6 +611,35 @@ async function studioDelete(i) {
   if (i === stIndex) showCurrentLine();
 }
 
+/* ---- Reference video: watch the scene while recording ---- */
+function loadVideo(file) {
+  if (!file) return;
+  const v = $("video");
+  if (videoUrl) URL.revokeObjectURL(videoUrl);
+  videoUrl = URL.createObjectURL(file);
+  v.src = videoUrl;
+  v.muted = true;              // start muted to avoid mic bleed; unmute for headphones
+  v.style.display = "block";
+  $("videoEmpty").style.display = "none";
+  videoReady = true;
+  v.onloadedmetadata = () => seekVideoToCurrent();
+  toast("Video loaded: " + file.name + " — unmute for sound (use headphones)");
+}
+function seekVideoToCurrent() {
+  const v = $("video");
+  if (!videoReady || !v.duration || isNaN(v.duration)) return;
+  const t = cues[stIndex] ? cues[stIndex].start : 0;
+  try { v.currentTime = Math.max(0, Math.min(t, v.duration - 0.05)); } catch (e) {}
+}
+function playVideoScene() {
+  const v = $("video");
+  if (!videoReady) return;
+  seekVideoToCurrent();
+  const p = v.play();
+  if (p && p.catch) p.catch(() => {});
+}
+function pauseVideo() { const v = $("video"); if (videoReady) { try { v.pause(); } catch (e) {} } }
+
 /* ---- PREP phase: give thinking time, countdown, then auto-record ---- */
 function gotoPrep() {
   phase = "prep";
@@ -619,6 +672,7 @@ function gotoRecording() {
   mediaRecorder.start();
   recStartTs = performance.now();
   updatePrimaryBtn();
+  playVideoScene();
 }
 
 function cancelRecorder() {
@@ -632,6 +686,7 @@ function stopRecording() {
 
 async function onRecStop() {
   phase = "saving";
+  pauseVideo();
   const blob = new Blob(recChunks, { type: (mediaRecorder && mediaRecorder.mimeType) || "audio/webm" });
   mediaRecorder = null;
   const i = stIndex;
@@ -665,6 +720,7 @@ async function onRecStop() {
 
 function gotoDone() {
   phase = "done";
+  pauseVideo();
   $("stCountdown").style.display = "none";
   setStatus('<span class="saved">✓ Reached the last line</span>');
   $("stText").textContent = "🎉 Reached the end. Use ⤓ Export, or slide back to record more.";
@@ -680,6 +736,7 @@ function afterNav() { if (sessionLive() && !paused) gotoPrep(); else gotoIdle();
 
 function pauseSession() {
   paused = true;
+  pauseVideo();
   $("stCountdown").style.display = "none";
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     // Keep the take so far, then pause (onRecStop finishes into the paused state).
@@ -949,6 +1006,12 @@ $("scrubber").oninput = (e) => {
   updatePrimaryBtn();
 };
 $("scrubber").onchange = () => { afterNav(); };
+
+// Reference video
+const videoInput = $("videoInput");
+$("stVideoBtn").onclick = () => videoInput.click();
+$("videoLoadBtn").onclick = () => videoInput.click();
+videoInput.onchange = () => { if (videoInput.files[0]) loadVideo(videoInput.files[0]); videoInput.value = ""; };
 
 $("setPrep").oninput = (e) => { settings.prep = +e.target.value; $("setPrepV").textContent = settings.prep; saveSettings(); };
 $("setSilence").oninput = (e) => { settings.silence = +e.target.value; $("setSilenceV").textContent = settings.silence.toFixed(1); saveSettings(); };
