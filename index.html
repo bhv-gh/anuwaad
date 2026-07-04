@@ -319,6 +319,7 @@ let studioAudio = null;
 let playingIndex = -1;
 let videoUrl = null;
 let videoReady = false;
+let videoStopAt = Infinity; // pause playback at this time (the current line's end)
 
 let mediaRecorder = null;
 let recChunks = [];
@@ -657,6 +658,8 @@ function playVideo(muted) {
   const v = $("video");
   if (!videoReady) return;
   v.muted = !!muted;
+  const c = cues[stIndex];
+  videoStopAt = c ? c.end : Infinity; // stop at this line's end, don't drift into the next scene
   seekVideoToCurrent();
   const p = v.play();
   if (p && p.catch) p.catch(() => {});
@@ -818,6 +821,12 @@ function tick() {
   document.documentElement.style.setProperty("--glow", (phase === "recording" ? glow : glow * 0.3).toFixed(3));
 
   drawWave(rms);
+
+  // Stop reference-video playback at the current line's end so it doesn't run into the next scene.
+  if (videoReady && (phase === "preview" || phase === "recording") && videoStopAt < Infinity) {
+    const v = $("video");
+    if (!v.paused && v.currentTime >= videoStopAt) v.pause();
+  }
 
   const now = performance.now();
 
