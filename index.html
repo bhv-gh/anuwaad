@@ -752,14 +752,14 @@ function startDubPreview() {
   refreshPlacements();
   dubbing = true; dubActive = -1; phase = "dub";
   const v = $("video");
-  v.muted = !settings.mixOriginal;   // keep original audio (ducked) if mixing, else silent
+  v.muted = false;   // always play the original (music bed), ducked under your takes
   v.volume = 1;
   videoStopAt = Infinity;
   const c = cues[stIndex];
   try { v.currentTime = c ? c.start : 0; } catch (e) {}
   v.play().catch(() => {});
   setStatus('<span class="rec">▶ DUB PREVIEW</span>');
-  $("stHint").textContent = "Video + your recordings playing in sync · SPACE / Stop to end";
+  $("stHint").textContent = "Original music bed + your recordings in sync · SPACE / Stop to end";
   updatePrimaryBtn();
 }
 function stopDubClip() { if (dubAudio) { try { dubAudio.pause(); } catch (e) {} dubAudio = null; } dubActive = -1; }
@@ -780,8 +780,8 @@ function dubTick() {
     const p = PLACE[c.index]; if (!p) continue;
     if (t >= p.start && t < p.end) { idx = c.index; cur = p; break; }
   }
-  // duck the original audio under the current take when mixing
-  if (settings.mixOriginal && !v.muted) v.volume = idx >= 0 ? (settings.duck != null ? settings.duck : 0.12) : 1;
+  // duck the original audio (music bed) under the current take
+  if (!v.muted) v.volume = idx >= 0 ? (settings.duck != null ? settings.duck : 0.12) : 1;
   if (idx !== dubActive) {
     stopDubClip();
     dubActive = idx;
