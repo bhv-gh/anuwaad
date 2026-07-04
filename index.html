@@ -97,6 +97,28 @@
     transition: background .1s;
   }
   #studio.on { display: flex; }
+  .st-body { flex: 1; display: flex; min-height: 0; }
+  .st-panel {
+    width: 320px; flex-shrink: 0; border-left: 1px solid var(--border);
+    background: rgba(0,0,0,.18); display: flex; flex-direction: column; min-height: 0;
+  }
+  .st-panel-head { padding: 14px 16px; font-size: 13px; font-weight: 600; color: var(--text); border-bottom: 1px solid var(--border); }
+  .st-panel-head span { color: var(--orange); }
+  .rec-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .rec-empty { color: var(--muted); font-size: 13px; padding: 24px 12px; text-align: center; line-height: 1.5; }
+  .rec-item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 9px;
+    cursor: pointer; margin-bottom: 4px; border: 1px solid transparent;
+  }
+  .rec-item:hover { background: var(--panel2); }
+  .rec-item.current { border-color: var(--orange); background: rgba(255,122,26,.10); }
+  .rec-item.playing { background: rgba(255,122,26,.18); }
+  .rec-num { font-size: 12px; color: var(--muted); min-width: 34px; font-variant-numeric: tabular-nums; }
+  .rec-body { flex: 1; min-width: 0; }
+  .rec-text { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rec-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .rec-play, .rec-del { padding: 4px 8px; font-size: 12px; min-width: 0; }
+  @media (max-width: 760px) { .st-panel { display: none; } }
   .st-top { display: flex; align-items: center; gap: 12px; padding: 16px 22px; }
   .st-top .spacer { flex: 1; }
   .st-count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -176,6 +198,7 @@
     <div class="spacer"></div>
     <span class="st-count" id="stCount"></span>
   </div>
+  <div class="st-body">
   <div class="st-mid">
     <div class="st-timecode" id="stTime"></div>
     <div class="st-text" id="stText"></div>
@@ -186,6 +209,11 @@
     </div>
     <div class="st-timer" id="stTimer"></div>
     <div class="st-hint" id="stHint"></div>
+  </div>
+  <aside class="st-panel">
+    <div class="st-panel-head">Recordings · <span id="recCount">0</span></div>
+    <div id="recList" class="rec-list"></div>
+  </aside>
   </div>
   <div class="st-bottom">
     <div class="st-scrub">
@@ -246,6 +274,9 @@ let analyser = null;
 let micSource = null;
 let timeData = null;
 let rafHandle = null;
+
+let studioAudio = null;
+let playingIndex = -1;
 
 let mediaRecorder = null;
 let recChunks = [];
@@ -395,6 +426,7 @@ function openStudio(startIndex) {
   studioOn = true; paused = false;
   $("studio").classList.add("on");
   setupScrubber();
+  renderRecList();
   startWaveLoop();
   gotoIdle();
 }
@@ -448,6 +480,7 @@ function closeStudio() {
   studioOn = false;
   stopRAF();
   cancelRecorder();
+  stopStudioPlay();
   if (micSource) { try { micSource.disconnect(); } catch (e) {} micSource = null; }
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -469,6 +502,89 @@ function showCurrentLine() {
   st.className = "scrub-side left";
   st.textContent = clips[stIndex] ? "✓ recorded" : "· not yet";
   st.style.color = clips[stIndex] ? "var(--ok)" : "";
+  highlightCurrentRec();
+}
+
+/* ---- Recordings panel (right side) ---- */
+function renderRecList() {
+  const box = $("recList"); if (!box) return;
+  const recorded = cues.filter(c => clips[c.index]);
+  $("recCount").textContent = recorded.length;
+  if (!recorded.length) {
+    box.innerHTML = '<div class="rec-empty">No recordings yet.<br>Your takes will appear here as you record.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  for (const c of recorded) {
+    const i = c.index;
+    const dur = clipMeta[i] ? clipMeta[i].duration : 0;
+    const item = document.createElement("div");
+    item.className = "rec-item" + (i === stIndex ? " current" : "") + (i === playingIndex ? " playing" : "");
+    item.dataset.i = i;
+    item.innerHTML =
+      `<div class="rec-num">#${i + 1}</div>
+       <div class="rec-body">
+         <div class="rec-text">${escapeHtml(c.text) || "(no text)"}</div>
+         <div class="rec-meta">${fmtTime(c.start)} · ${dur.toFixed(1)}s</div>
+       </div>
+       <button class="rec-play ghost" title="Listen">${i === playingIndex ? "⏸" : "▶"}</button>
+       <button class="rec-del ghost" title="Delete">🗑</button>`;
+    item.querySelector(".rec-body").onclick = () => jumpToLine(i);
+    item.querySelector(".rec-num").onclick = () => jumpToLine(i);
+    item.querySelector(".rec-play").onclick = (e) => { e.stopPropagation(); toggleStudioPlay(i); };
+    item.querySelector(".rec-del").onclick = (e) => { e.stopPropagation(); studioDelete(i); };
+    box.appendChild(item);
+  }
+}
+
+function highlightCurrentRec() {
+  const box = $("recList"); if (!box) return;
+  box.querySelectorAll(".rec-item").forEach(el => {
+    const on = +el.dataset.i === stIndex;
+    el.classList.toggle("current", on);
+    if (on) el.scrollIntoView({ block: "nearest" });
+  });
+}
+
+/* Jump to a recorded line — pause there so it isn't recorded over by accident. */
+function jumpToLine(i) {
+  cancelRecorder();
+  stIndex = i;
+  if (sessionLive()) {
+    paused = true; phase = "paused";
+    $("stCountdown").style.display = "none";
+    showCurrentLine();
+    setStatus('<span class="paused">⏸ at #' + (i + 1) + '</span>');
+    $("stHint").textContent = "▶ to listen · SPACE to record over this line · → to continue";
+    updatePrimaryBtn();
+  } else {
+    gotoIdle();
+  }
+  renderRecList();
+}
+
+function stopStudioPlay() {
+  if (studioAudio) { studioAudio.pause(); studioAudio = null; }
+  playingIndex = -1;
+}
+function toggleStudioPlay(i) {
+  const wasPlaying = playingIndex === i;
+  stopStudioPlay();
+  if (wasPlaying) { renderRecList(); return; }
+  const url = URL.createObjectURL(clips[i]);
+  const a = new Audio(url);
+  studioAudio = a; playingIndex = i;
+  a.onended = a.onerror = () => { URL.revokeObjectURL(url); if (studioAudio === a) { studioAudio = null; playingIndex = -1; renderRecList(); } };
+  a.play();
+  renderRecList();
+}
+
+async function studioDelete(i) {
+  if (playingIndex === i) stopStudioPlay();
+  delete clips[i]; delete clipMeta[i];
+  await idbDel("clips", i); await saveState();
+  renderRecList(); updateProgress();
+  if (i === stIndex) showCurrentLine();
 }
 
 /* ---- PREP phase: give thinking time, countdown, then auto-record ---- */
@@ -522,6 +638,7 @@ async function onRecStop() {
   const duration = await getBlobDuration(blob);
   clips[i] = blob; clipMeta[i] = { duration };
   try { await saveClip(i, blob, duration); await saveState(); } catch (e) { toast("Save failed: " + e.message); }
+  renderRecList();
   setStatus('<span class="saved">✓ SAVED</span>');
   const c = cues[i], w = windowDur(c);
   $("stHint").textContent = duration > w
