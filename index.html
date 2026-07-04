@@ -116,13 +116,7 @@
   .st-hint { font-size: 13px; color: var(--muted); }
   .st-timer { font-variant-numeric: tabular-nums; color: var(--orange2); font-size: 14px; font-weight: 600; }
   .st-bottom { padding: 16px 22px 26px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
-  .st-mic { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
-  .st-mic select {
-    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 6px 10px; font: inherit; max-width: min(420px, 80vw);
-  }
-  .st-mic select:focus { outline: none; border-color: var(--orange); }
-  .st-mic button { padding: 6px 10px; }
+  .st-keys { font-size: 12px; color: var(--muted); letter-spacing: .3px; }
   .st-scrub { display: flex; align-items: center; gap: 12px; width: min(760px, 92vw); }
   .st-scrub input[type=range] { flex: 1; accent-color: var(--orange); height: 6px; cursor: pointer; }
   .scrub-side { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 70px; }
@@ -194,11 +188,6 @@
     <div class="st-hint" id="stHint"></div>
   </div>
   <div class="st-bottom">
-    <div class="st-mic">
-      <span>🎤</span>
-      <select id="micSelect" title="Select microphone"></select>
-      <button id="micRefresh" class="ghost" title="Refresh microphone list">↻</button>
-    </div>
     <div class="st-scrub">
       <span class="scrub-side" id="scrubStatus"></span>
       <input type="range" id="scrubber" min="0" max="0" step="1" value="0">
@@ -210,6 +199,7 @@
       <button id="stRedo">↻ Redo</button>
       <button id="stSkip">Skip ▶</button>
     </div>
+    <div class="st-keys">SPACE start / stop · ← → skip lines · ESC exit</div>
     <div class="st-settings">
       <label>Think time before recording
         <input type="range" id="setPrep" min="0" max="12" step="1">
@@ -254,7 +244,6 @@ let stream = null;
 let audioCtx = null;
 let analyser = null;
 let micSource = null;
-let selectedMicId = "";
 let timeData = null;
 let rafHandle = null;
 
@@ -406,26 +395,16 @@ function openStudio(startIndex) {
   studioOn = true; paused = false;
   $("studio").classList.add("on");
   setupScrubber();
-  refreshMics();
   startWaveLoop();
   gotoIdle();
-}
-
-/* Request a mic stream honoring the selected device. */
-function getMicStream() {
-  const audio = { echoCancellation: true, noiseSuppression: true };
-  if (selectedMicId) audio.deviceId = { exact: selectedMicId };
-  return navigator.mediaDevices.getUserMedia({ audio });
 }
 
 /* Acquire mic (once) and begin the auto-record flow from the current line. */
 async function startSession() {
   if (!studioOn) return;
   if (!stream) {
-    try { stream = await getMicStream(); }
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
     catch (e) { toast("Microphone access denied. Allow the mic and try again."); return; }
-    selectedMicId = activeMicId(stream) || selectedMicId;
-    await refreshMics(); // labels are available now that permission is granted
   }
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -439,52 +418,6 @@ async function startSession() {
   if (audioCtx.state === "suspended") await audioCtx.resume();
   paused = false;
   gotoPrep();
-}
-
-/* Which device is the live stream actually using? */
-function activeMicId(str) {
-  const t = str && str.getAudioTracks && str.getAudioTracks()[0];
-  const s = t && t.getSettings && t.getSettings();
-  return (s && s.deviceId) || "";
-}
-
-/* Populate the microphone dropdown. Labels only appear after mic permission is granted. */
-async function refreshMics() {
-  let devices = [];
-  try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
-  const mics = devices.filter(d => d.kind === "audioinput");
-  const sel = $("micSelect");
-  sel.innerHTML = "";
-  if (!mics.length) {
-    const o = document.createElement("option"); o.value = ""; o.textContent = "No microphones found"; sel.appendChild(o);
-    return;
-  }
-  mics.forEach((m, i) => {
-    const o = document.createElement("option");
-    o.value = m.deviceId;
-    o.textContent = m.label || ("Microphone " + (i + 1) + (m.deviceId === "default" ? " (default)" : ""));
-    sel.appendChild(o);
-  });
-  if (selectedMicId && mics.some(m => m.deviceId === selectedMicId)) sel.value = selectedMicId;
-  else selectedMicId = sel.value;
-}
-
-/* Change / switch the active microphone. */
-async function applyMic(newId) {
-  selectedMicId = newId;
-  localStorage.setItem("srtdub-mic", selectedMicId);
-  if (!sessionLive()) return; // nothing live yet — will be used on next Start
-  cancelRecorder();
-  let newStream;
-  try { newStream = await getMicStream(); }
-  catch (e) { toast("Couldn't switch microphone."); return; }
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  stream = newStream;
-  if (micSource) { try { micSource.disconnect(); } catch (e) {} }
-  micSource = audioCtx.createMediaStreamSource(stream);
-  micSource.connect(analyser);
-  toast("Microphone switched.");
-  gotoIdle();
 }
 
 function setupScrubber() {
@@ -900,34 +833,28 @@ $("scrubber").oninput = (e) => {
 };
 $("scrubber").onchange = () => { afterNav(); };
 
-// Microphone selection
-$("micSelect").onchange = (e) => applyMic(e.target.value);
-$("micRefresh").onclick = async () => { await refreshMics(); toast("Microphone list refreshed."); };
-if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-  navigator.mediaDevices.addEventListener("devicechange", () => { if (studioOn) refreshMics(); });
-}
-
 $("setPrep").oninput = (e) => { settings.prep = +e.target.value; $("setPrepV").textContent = settings.prep; saveSettings(); };
 $("setSilence").oninput = (e) => { settings.silence = +e.target.value; $("setSilenceV").textContent = settings.silence.toFixed(1); saveSettings(); };
 $("setSens").oninput = (e) => { settings.sens = +e.target.value; $("setSensV").textContent = settings.sens; saveSettings(); };
 
 document.addEventListener("keydown", (e) => {
   if (!studioOn) return;
+  const tag = e.target && e.target.tagName;
   if (e.code === "Space") {
+    if (tag === "BUTTON") e.target.blur(); // avoid double-trigger on a focused button
     e.preventDefault();
     if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
     else if (phase === "prep") gotoRecording();
     else if (phase === "recording") stopRecording();
     else if (phase === "paused") resumeSession();
-  } else if (e.code === "ArrowLeft") { e.preventDefault(); prevLine(); }
-  else if (e.code === "ArrowRight") { e.preventDefault(); skipLine(); }
+  } else if (e.code === "ArrowRight" || e.code === "ArrowDown") { e.preventDefault(); skipLine(); }
+  else if (e.code === "ArrowLeft" || e.code === "ArrowUp") { e.preventDefault(); prevLine(); }
   else if (e.code === "Escape") { e.preventDefault(); closeStudio(); }
 });
 
 /* ================= Boot ================= */
 (async function boot() {
   loadSettings();
-  selectedMicId = localStorage.getItem("srtdub-mic") || "";
   try {
     db = await openDB();
     const st = await idbGet("state", "project");
