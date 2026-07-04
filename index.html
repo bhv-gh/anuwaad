@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anuwaad — SRT Dubbing Studio</title>
+<style>
+  :root {
+    --bg: #17110c;
+    --bg2: #1f1710;
+    --panel: #241a11;
+    --panel2: #2c2015;
+    --border: #3a2b1c;
+    --text: #fff7ef;
+    --muted: #b39a83;
+    --orange: #ff7a1a;
+    --orange2: #ff9d4d;
+    --orange-deep: #e85d04;
+    --ok: #46c37b;
+    --rec: #ff4d4f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: radial-gradient(1200px 700px at 50% -10%, #2a1c10 0%, var(--bg) 60%);
+    color: var(--text);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(23,17,12,.85); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .3px; }
+  header h1 .accent { color: var(--orange); }
+  header .spacer { flex: 1; }
+  .pill {
+    background: var(--panel2); border: 1px solid var(--border);
+    padding: 4px 11px; border-radius: 999px; font-size: 12px; color: var(--muted);
+  }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text);
+    padding: 8px 15px; border-radius: 10px; transition: .12s; font-weight: 500;
+  }
+  button:hover:not(:disabled) { border-color: var(--orange); color: var(--orange2); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: linear-gradient(180deg, var(--orange2), var(--orange-deep)); border-color: var(--orange-deep); color: #fff; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+  button.ghost { background: transparent; }
+  button.danger { color: var(--rec); border-color: #5a2a26; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 24px 20px 120px; }
+
+  /* Upload */
+  .drop {
+    border: 2px dashed var(--border); border-radius: 16px;
+    padding: 60px 20px; text-align: center; color: var(--muted);
+    background: var(--panel); transition: .15s;
+  }
+  .drop.hover { border-color: var(--orange); color: var(--text); background: var(--panel2); }
+  .drop h2 { color: var(--text); margin: 0 0 8px; font-size: 20px; }
+  .drop .big { font-size: 40px; margin-bottom: 8px; }
+
+  /* List */
+  .controls-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .progress-name { font-size: 13px; color: var(--muted); }
+  .bar { height: 6px; background: var(--panel2); border-radius: 999px; overflow: hidden; flex: 1; min-width: 120px; }
+  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--orange), var(--orange2)); width: 0%; transition: width .3s; }
+  .row {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 8px;
+  }
+  .row.done { border-color: #34502f; }
+  .idx { min-width: 40px; text-align: center; color: var(--muted); font-size: 13px; padding-top: 2px; font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); display: inline-block; margin-top: 5px; }
+  .dot.done { background: var(--ok); }
+  .body { flex: 1; min-width: 0; }
+  .time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; margin-bottom: 3px; }
+  .text { font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+  .ctrls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .meta { font-size: 12px; color: var(--muted); }
+  .meta.warn { color: var(--orange2); }
+
+  /* ------- Studio overlay ------- */
+  #studio {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    flex-direction: column;
+    background:
+      radial-gradient(900px 600px at 50% 30%, rgba(255,122,26,var(--glow,0)) 0%, transparent 60%),
+      radial-gradient(1400px 900px at 50% 120%, #2a1809 0%, var(--bg) 55%);
+    transition: background .1s;
+  }
+  #studio.on { display: flex; }
+  .st-top { display: flex; align-items: center; gap: 12px; padding: 16px 22px; }
+  .st-top .spacer { flex: 1; }
+  .st-count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .st-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 24px; text-align: center; gap: 18px; }
+  .st-timecode { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: .5px; }
+  .st-text {
+    font-size: clamp(22px, 4.2vw, 44px); font-weight: 600; max-width: 900px;
+    white-space: pre-wrap; line-height: 1.3; text-wrap: balance;
+  }
+  .st-status { font-size: 15px; font-weight: 600; height: 24px; letter-spacing: .3px; }
+  .st-status .prep { color: var(--orange2); }
+  .st-status .rec { color: var(--orange); }
+  .st-status .saved { color: var(--ok); }
+  .st-status .paused { color: var(--muted); }
+  .st-countdown { font-size: 72px; font-weight: 800; color: var(--orange); line-height: 1; text-shadow: 0 0 40px rgba(255,122,26,.5); }
+  canvas#wave { width: min(760px, 90vw); height: 130px; display: block; }
+  .st-hint { font-size: 13px; color: var(--muted); }
+  .st-timer { font-variant-numeric: tabular-nums; color: var(--orange2); font-size: 14px; font-weight: 600; }
+  .st-bottom { padding: 16px 22px 26px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .st-scrub { display: flex; align-items: center; gap: 12px; width: min(760px, 92vw); }
+  .st-scrub input[type=range] { flex: 1; accent-color: var(--orange); height: 6px; cursor: pointer; }
+  .scrub-side { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 70px; }
+  .scrub-side.left { text-align: right; }
+  .st-btns { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .st-btns button { min-width: 92px; }
+  .st-settings { display: flex; gap: 22px; flex-wrap: wrap; justify-content: center; align-items: center; font-size: 12px; color: var(--muted); }
+  .st-settings label { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+  .st-settings input[type=range] { width: 150px; accent-color: var(--orange); }
+  .st-settings b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 18px; border-radius: 10px; font-size: 14px; z-index: 200;
+    box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; pointer-events: none; transition: .2s;
+  }
+  .toast.show { opacity: 1; }
+  a.hidden-dl { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="accent">◉</span> Anuwaad <span style="color:var(--muted);font-weight:400;font-size:13px">dubbing studio</span></h1>
+  <span id="langPill" class="pill" style="display:none"></span>
+  <span id="progressPill" class="pill" style="display:none"></span>
+  <div class="spacer"></div>
+  <button id="studioBtn" class="primary" style="display:none">▶ Recording Studio</button>
+  <button id="exportBtn" style="display:none" disabled>Export WAV</button>
+  <button id="changeSrtBtn" class="ghost" style="display:none">New SRT</button>
+</header>
+
+<div class="wrap">
+  <div id="uploadView">
+    <div class="drop" id="drop">
+      <div class="big">🎙️</div>
+      <h2>Drop your <span style="color:var(--orange)">.srt</span> file here</h2>
+      <div>or click to choose a file</div>
+      <input type="file" id="fileInput" accept=".srt,text/plain" style="display:none">
+    </div>
+  </div>
+
+  <div id="editorView" style="display:none">
+    <div class="controls-bar">
+      <span class="progress-name" id="fileName"></span>
+      <div class="bar"><span id="barFill"></span></div>
+    </div>
+    <div id="list"></div>
+  </div>
+</div>
+
+<!-- Studio -->
+<div id="studio">
+  <div class="st-top">
+    <button id="stList" class="ghost">☰ List</button>
+    <button id="stExportTop" class="ghost">⤓ Export</button>
+    <div class="spacer"></div>
+    <span class="st-count" id="stCount"></span>
+  </div>
+  <div class="st-mid">
+    <div class="st-timecode" id="stTime"></div>
+    <div class="st-text" id="stText"></div>
+    <div class="st-status" id="stStatus"></div>
+    <div style="position:relative;display:flex;align-items:center;justify-content:center;min-height:130px">
+      <canvas id="wave" width="760" height="130"></canvas>
+      <div class="st-countdown" id="stCountdown" style="display:none"></div>
+    </div>
+    <div class="st-timer" id="stTimer"></div>
+    <div class="st-hint" id="stHint"></div>
+  </div>
+  <div class="st-bottom">
+    <div class="st-scrub">
+      <span class="scrub-side" id="scrubStatus"></span>
+      <input type="range" id="scrubber" min="0" max="0" step="1" value="0">
+      <span class="scrub-side" id="scrubEnd"></span>
+    </div>
+    <div class="st-btns">
+      <button id="stPrev">◀ Prev</button>
+      <button id="stPause" class="primary">▶ Start Recording</button>
+      <button id="stRedo">↻ Redo</button>
+      <button id="stSkip">Skip ▶</button>
+    </div>
+    <div class="st-settings">
+      <label>Think time before recording
+        <input type="range" id="setPrep" min="0" max="12" step="1">
+        <b><span id="setPrepV"></span>s</b>
+      </label>
+      <label>Silence to auto-advance
+        <input type="range" id="setSilence" min="0.5" max="4" step="0.1">
+        <b><span id="setSilenceV"></span>s</b>
+      </label>
+      <label>Mic sensitivity
+        <input type="range" id="setSens" min="1" max="10" step="1">
+        <b><span id="setSensV"></span></b>
+      </label>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<a class="hidden-dl" id="downloader"></a>
+
+<script>
+"use strict";
+
+/* ================= State ================= */
+let cues = [];
+let clips = {};        // index -> Blob
+let clipMeta = {};     // index -> {duration}
+let language = "";
+let srtName = "";
+
+let db = null;
+
+/* Studio session state */
+const settings = { prep: 4, silence: 1.5, sens: 5 };
+let studioOn = false;
+let stIndex = 0;
+let phase = "idle";    // idle | prep | recording | saving | paused | done
+let paused = false;
+
+let stream = null;
+let audioCtx = null;
+let analyser = null;
+let timeData = null;
+let rafHandle = null;
+
+let mediaRecorder = null;
+let recChunks = [];
+let recStartTs = 0;
+let hasSpoken = false;
+let silenceStart = 0;
+let prepEndTs = 0;
+let glow = 0;
+
+/* ================= IndexedDB ================= */
+const DB_NAME = "srt-dub", DB_VER = 1;
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VER);
+    req.onupgradeneeded = (e) => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains("state")) d.createObjectStore("state");
+      if (!d.objectStoreNames.contains("clips")) d.createObjectStore("clips");
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+const idbGet = (s, k) => new Promise((res, rej) => { const t = db.transaction(s).objectStore(s).get(k); t.onsuccess = () => res(t.result); t.onerror = () => rej(t.error); });
+const idbPut = (s, k, v) => new Promise((res, rej) => { const t = db.transaction(s, "readwrite").objectStore(s).put(v, k); t.onsuccess = () => res(); t.onerror = () => rej(t.error); });
+const idbDel = (s, k) => new Promise((res, rej) => { const t = db.transaction(s, "readwrite").objectStore(s).delete(k); t.onsuccess = () => res(); t.onerror = () => rej(t.error); });
+const idbClear = (s) => new Promise((res, rej) => { const t = db.transaction(s, "readwrite").objectStore(s).clear(); t.onsuccess = () => res(); t.onerror = () => rej(t.error); });
+
+async function saveState() { await idbPut("state", "project", { language, srtName, cues, savedAt: Date.now() }); }
+async function saveClip(i, blob, duration) { await idbPut("clips", i, { blob, duration }); }
+
+/* ================= SRT ================= */
+function parseTime(t) {
+  const m = t.trim().match(/(\d+):(\d+):(\d+)[,.](\d+)/);
+  if (!m) return null;
+  return (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;
+}
+function fmtTime(s) {
+  if (s == null || isNaN(s)) return "--:--";
+  const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = Math.floor(s % 60), ms = Math.round((s - Math.floor(s)) * 1000);
+  const p = (n, l = 2) => String(n).padStart(l, "0");
+  return (hh > 0 ? p(hh) + ":" : "") + p(mm) + ":" + p(ss) + "." + p(ms, 3);
+}
+function parseSRT(txt) {
+  const out = [];
+  const blocks = txt.replace(/\r/g, "").split(/\n\s*\n/);
+  for (const b of blocks) {
+    const lines = b.split("\n");
+    let tc = -1;
+    for (let i = 0; i < lines.length; i++) if (lines[i].includes("-->")) { tc = i; break; }
+    if (tc === -1) continue;
+    const parts = lines[tc].split("-->");
+    const start = parseTime(parts[0]), end = parseTime(parts[1]);
+    if (start == null || end == null) continue;
+    out.push({ index: out.length, start, end, text: lines.slice(tc + 1).join("\n").trim() });
+  }
+  return out;
+}
+function decodeBytes(arrBuf) {
+  const bytes = new Uint8Array(arrBuf);
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return new TextDecoder("utf-8").decode(bytes.subarray(3));
+  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  const sample = bytes.subarray(0, Math.min(bytes.length, 2000));
+  let ze = 0, zo = 0;
+  for (let i = 0; i < sample.length; i++) if (sample[i] === 0) (i % 2 === 0 ? ze++ : zo++);
+  if ((ze + zo) / sample.length > 0.2) return new TextDecoder(zo >= ze ? "utf-16le" : "utf-16be").decode(bytes);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+/* ================= UI helpers ================= */
+const $ = (id) => document.getElementById(id);
+let toastTimer = null;
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2200); }
+const windowDur = (c) => Math.max(0.01, c.end - c.start);
+
+function updateProgress() {
+  const done = Object.keys(clips).length;
+  $("progressPill").textContent = `${done} / ${cues.length} recorded`;
+  $("progressPill").style.display = "";
+  $("exportBtn").disabled = done === 0;
+  $("barFill").style.width = (cues.length ? (done / cues.length * 100) : 0) + "%";
+}
+
+function renderList() {
+  const list = $("list");
+  list.innerHTML = "";
+  for (const c of cues) {
+    const row = document.createElement("div");
+    row.className = "row" + (clips[c.index] ? " done" : "");
+    row.id = "row-" + c.index;
+    row.innerHTML =
+      `<div class="idx">${c.index + 1}<br><span class="dot ${clips[c.index] ? "done" : ""}" id="dot-${c.index}"></span></div>
+       <div class="body">
+         <div class="time">${fmtTime(c.start)} → ${fmtTime(c.end)} (${windowDur(c).toFixed(1)}s)</div>
+         <div class="text">${escapeHtml(c.text) || "(no text)"}</div>
+         <div class="ctrls" id="ctrls-${c.index}"></div>
+       </div>`;
+    list.appendChild(row);
+    renderRowControls(c.index);
+  }
+}
+function escapeHtml(s) { return (s || "").replace(/[&<>]/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[m])); }
+
+function renderRowControls(i) {
+  const ctrls = $("ctrls-" + i);
+  if (!ctrls) return;
+  ctrls.innerHTML = "";
+  const c = cues[i];
+  const rec = document.createElement("button");
+  rec.textContent = clips[i] ? "🎙 Re-record" : "🎙 Record";
+  rec.onclick = () => openStudio(i);
+  ctrls.appendChild(rec);
+  if (clips[i]) {
+    const play = document.createElement("button"); play.className = "ghost"; play.textContent = "▶ Play";
+    play.onclick = () => playClip(i); ctrls.appendChild(play);
+    const del = document.createElement("button"); del.className = "ghost"; del.textContent = "🗑";
+    del.title = "Delete recording"; del.onclick = () => deleteClip(i); ctrls.appendChild(del);
+    const dur = clipMeta[i] ? clipMeta[i].duration : null;
+    const meta = document.createElement("span"); meta.className = "meta";
+    if (dur != null) {
+      const w = windowDur(c);
+      if (dur > w) { meta.className = "meta warn"; meta.textContent = `${dur.toFixed(1)}s → sped ×${(dur / w).toFixed(2)} to fit ${w.toFixed(1)}s`; }
+      else meta.textContent = `${dur.toFixed(1)}s (fits, silence after)`;
+    }
+    ctrls.appendChild(meta);
+  }
+}
+
+/* ================= Playback (list) ================= */
+let listAudio = null;
+function playClip(i) { if (listAudio) listAudio.pause(); const u = URL.createObjectURL(clips[i]); listAudio = new Audio(u); listAudio.onended = () => URL.revokeObjectURL(u); listAudio.play(); }
+async function deleteClip(i) {
+  delete clips[i]; delete clipMeta[i];
+  await idbDel("clips", i); await saveState();
+  const row = $("row-" + i); if (row) row.classList.remove("done");
+  const dot = $("dot-" + i); if (dot) dot.classList.remove("done");
+  renderRowControls(i); updateProgress();
+}
+
+/* ================= Studio ================= */
+/* Show the studio in READY (idle) state — no microphone yet. Lets you scrub to pick a start line. */
+function openStudio(startIndex) {
+  if (!cues.length) return;
+  if (typeof startIndex === "number") stIndex = startIndex;
+  else { stIndex = cues.findIndex(c => !clips[c.index]); if (stIndex < 0) stIndex = 0; }
+  studioOn = true; paused = false;
+  $("studio").classList.add("on");
+  setupScrubber();
+  startWaveLoop();
+  gotoIdle();
+}
+
+/* Acquire mic (once) and begin the auto-record flow from the current line. */
+async function startSession() {
+  if (!studioOn) return;
+  if (!stream) {
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) { toast("Microphone access denied. Allow the mic and try again."); return; }
+  }
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.75;
+    timeData = new Uint8Array(analyser.fftSize);
+    analyser._freq = new Uint8Array(analyser.frequencyBinCount);
+    src.connect(analyser);
+  }
+  if (audioCtx.state === "suspended") await audioCtx.resume();
+  paused = false;
+  gotoPrep();
+}
+
+function setupScrubber() {
+  const sc = $("scrubber");
+  sc.min = 0; sc.max = Math.max(0, cues.length - 1); sc.value = stIndex;
+  $("scrubEnd").textContent = "of " + cues.length;
+}
+
+function gotoIdle() {
+  phase = "idle"; paused = false;
+  cancelRecorder();
+  $("stCountdown").style.display = "none";
+  showCurrentLine();
+  setStatus('<span class="paused">READY</span>');
+  $("stHint").textContent = "Slide to any line, then press Start (or SPACE). Skip songs by sliding past them.";
+  $("stTimer").textContent = "";
+  updatePrimaryBtn();
+}
+
+function updatePrimaryBtn() {
+  const b = $("stPause");
+  if (phase === "idle" || phase === "done" || phase === "seeking") b.textContent = "▶ Start Recording";
+  else if (paused) b.textContent = "▶ Resume";
+  else b.textContent = "⏸ Pause";
+}
+
+function closeStudio() {
+  studioOn = false;
+  stopRAF();
+  cancelRecorder();
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  analyser = null;
+  $("studio").classList.remove("on");
+  document.documentElement.style.setProperty("--glow", 0);
+  renderList(); updateProgress();
+}
+
+function setStatus(html) { $("stStatus").innerHTML = html; }
+function showCurrentLine() {
+  const c = cues[stIndex];
+  $("stCount").textContent = `Line ${stIndex + 1} of ${cues.length}  ·  ${Object.keys(clips).length} recorded`;
+  $("stTime").textContent = `${fmtTime(c.start)} → ${fmtTime(c.end)}  ·  ${windowDur(c).toFixed(1)}s slot`;
+  $("stText").textContent = c.text || "(no text)";
+  const sc = $("scrubber");
+  if (+sc.value !== stIndex) sc.value = stIndex;
+  const st = $("scrubStatus");
+  st.className = "scrub-side left";
+  st.textContent = clips[stIndex] ? "✓ recorded" : "· not yet";
+  st.style.color = clips[stIndex] ? "var(--ok)" : "";
+}
+
+/* ---- PREP phase: give thinking time, countdown, then auto-record ---- */
+function gotoPrep() {
+  phase = "prep";
+  hasSpoken = false;
+  showCurrentLine();
+  $("stTimer").textContent = "";
+  $("stHint").textContent = "Read the line and get your Konkani ready · SPACE to start now";
+  if (settings.prep <= 0) { gotoRecording(); return; }
+  prepEndTs = performance.now() + settings.prep * 1000;
+  $("stCountdown").style.display = "";
+  setStatus('<span class="prep">GET READY…</span>');
+  updatePrimaryBtn();
+}
+
+/* ---- RECORDING phase ---- */
+function gotoRecording() {
+  if (!stream) return;
+  phase = "recording";
+  hasSpoken = false;
+  silenceStart = 0;
+  recChunks = [];
+  $("stCountdown").style.display = "none";
+  setStatus('<span class="rec">● RECORDING</span>');
+  $("stHint").textContent = "Speak now · pause when done to auto-advance · SPACE to stop";
+  const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
+             : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+  mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  mediaRecorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
+  mediaRecorder.onstop = onRecStop;
+  mediaRecorder.start();
+  recStartTs = performance.now();
+  updatePrimaryBtn();
+}
+
+function cancelRecorder() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") { mediaRecorder.onstop = null; try { mediaRecorder.stop(); } catch (e) {} }
+  mediaRecorder = null;
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+}
+
+async function onRecStop() {
+  phase = "saving";
+  const blob = new Blob(recChunks, { type: (mediaRecorder && mediaRecorder.mimeType) || "audio/webm" });
+  mediaRecorder = null;
+  const i = stIndex;
+  const duration = await getBlobDuration(blob);
+  clips[i] = blob; clipMeta[i] = { duration };
+  try { await saveClip(i, blob, duration); await saveState(); } catch (e) { toast("Save failed: " + e.message); }
+  setStatus('<span class="saved">✓ SAVED</span>');
+  const c = cues[i], w = windowDur(c);
+  $("stHint").textContent = duration > w
+    ? `Take ${duration.toFixed(1)}s — will be sped ×${(duration / w).toFixed(2)} to fit`
+    : `Take ${duration.toFixed(1)}s — fits with silence after`;
+  // advance shortly
+  setTimeout(() => {
+    if (!studioOn || paused) return;
+    if (stIndex + 1 < cues.length) { stIndex++; gotoPrep(); }
+    else gotoDone();
+  }, 650);
+}
+
+function gotoDone() {
+  phase = "done";
+  $("stCountdown").style.display = "none";
+  setStatus('<span class="saved">✓ Reached the last line</span>');
+  $("stText").textContent = "🎉 Reached the end. Use ⤓ Export, or slide back to record more.";
+  $("stHint").textContent = "";
+  $("stTimer").textContent = "";
+  updatePrimaryBtn();
+}
+
+/* ---- transport controls ---- */
+const sessionLive = () => !!(stream && audioCtx);
+/* After moving to a new line: continue recording flow if mic is live, else stay in READY. */
+function afterNav() { if (sessionLive() && !paused) gotoPrep(); else gotoIdle(); }
+
+function pauseSession() {
+  paused = true; phase = "paused";
+  cancelRecorder();
+  $("stCountdown").style.display = "none";
+  setStatus('<span class="paused">⏸ PAUSED</span>');
+  $("stHint").textContent = "Session paused · press Resume or SPACE";
+  updatePrimaryBtn();
+}
+function resumeSession() { paused = false; gotoPrep(); }
+function prevLine() { cancelRecorder(); if (stIndex > 0) stIndex--; afterNav(); }
+function skipLine() { cancelRecorder(); if (stIndex + 1 < cues.length) { stIndex++; afterNav(); } else gotoDone(); }
+function redoLine() { cancelRecorder(); afterNav(); }
+
+/* ---- wave rendering + silence detection loop ---- */
+function sensThreshold() { return 0.06 - settings.sens * 0.005; } // sens 1..10 => 0.055..0.010
+
+function startWaveLoop() { stopRAF(); const loop = () => { rafHandle = requestAnimationFrame(loop); tick(); }; rafHandle = requestAnimationFrame(loop); }
+function stopRAF() { if (rafHandle) cancelAnimationFrame(rafHandle); rafHandle = null; }
+
+function tick() {
+  let rms = 0;
+  if (analyser) {
+    analyser.getByteTimeDomainData(timeData);
+    analyser.getByteFrequencyData(analyser._freq);
+    let sum = 0;
+    for (let i = 0; i < timeData.length; i++) { const v = (timeData[i] - 128) / 128; sum += v * v; }
+    rms = Math.sqrt(sum / timeData.length);
+  }
+
+  // glow reacts to voice
+  glow = Math.max(glow * 0.9, Math.min(0.5, rms * 4));
+  document.documentElement.style.setProperty("--glow", (phase === "recording" ? glow : glow * 0.3).toFixed(3));
+
+  drawWave(rms);
+
+  const now = performance.now();
+
+  if (phase === "prep") {
+    const remain = Math.max(0, prepEndTs - now);
+    $("stCountdown").textContent = Math.ceil(remain / 1000);
+    if (remain <= 0) gotoRecording();
+  } else if (phase === "recording") {
+    const el = (now - recStartTs) / 1000;
+    $("stTimer").textContent = "● " + el.toFixed(1) + "s";
+    const thr = sensThreshold();
+    if (rms > thr) { hasSpoken = true; silenceStart = 0; }
+    else if (hasSpoken) {
+      if (silenceStart === 0) silenceStart = now;
+      else if ((now - silenceStart) / 1000 >= settings.silence) stopRecording();
+    }
+    // safety cap
+    if (el > 60) stopRecording();
+  }
+}
+
+function drawWave(rms) {
+  const cv = $("wave"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, mid = H / 2;
+  ctx.clearRect(0, 0, W, H);
+  const freq = analyser ? analyser._freq : null;
+  const bars = 56;
+  const gap = 4;
+  const bw = (W - (bars - 1) * gap) / bars;
+  const active = phase === "recording" && !!freq;
+  for (let b = 0; b < bars; b++) {
+    // sample frequency bins (use lower half where voice lives)
+    let amp;
+    if (active) { const fi = Math.floor((b / bars) * (freq.length * 0.6)); amp = freq[fi] / 255; }
+    else amp = 0.06 + 0.045 * Math.sin(b * 0.5 + performance.now() / 320);
+    amp = Math.pow(amp, 0.9);
+    const h = Math.max(3, amp * (H * 0.92));
+    const x = b * (bw + gap);
+    const y = mid - h / 2;
+    const grad = ctx.createLinearGradient(0, y, 0, y + h);
+    grad.addColorStop(0, active ? "#ffb066" : "#7a5836");
+    grad.addColorStop(0.5, active ? "#ff7a1a" : "#8a5f34");
+    grad.addColorStop(1, active ? "#e85d04" : "#7a5836");
+    ctx.fillStyle = grad;
+    if (active) { ctx.shadowColor = "rgba(255,122,26,.6)"; ctx.shadowBlur = 10; } else ctx.shadowBlur = 0;
+    roundRect(ctx, x, y, bw, h, Math.min(bw / 2, 4));
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* ================= Duration measure ================= */
+function getBlobDuration(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(); a.preload = "metadata";
+    const done = (d) => { URL.revokeObjectURL(url); resolve(d || 0); };
+    a.onloadedmetadata = () => {
+      if (a.duration === Infinity || isNaN(a.duration)) { a.currentTime = 1e101; a.ontimeupdate = () => { a.ontimeupdate = null; done(a.duration); }; }
+      else done(a.duration);
+    };
+    a.onerror = () => done(0);
+    a.src = url;
+  });
+}
+
+/* ================= Export ================= */
+async function exportWav() {
+  const btn = $("exportBtn"); btn.disabled = true; const orig = btn.textContent; btn.textContent = "Rendering…";
+  try {
+    const SR = 44100;
+    const dctx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = {};
+    for (const i of Object.keys(clips)) {
+      try { decoded[i] = await dctx.decodeAudioData((await clips[i].arrayBuffer()).slice(0)); } catch (e) { console.warn("decode fail", i, e); }
+    }
+    dctx.close();
+
+    let total = 0;
+    for (const c of cues) {
+      const buf = decoded[c.index], w = windowDur(c);
+      let placed = w;
+      if (buf) placed = Math.min(buf.duration, w);
+      total = Math.max(total, c.end, c.start + placed);
+    }
+    total = Math.max(total, 0.1) + 0.2;
+
+    const off = new OfflineAudioContext(1, Math.ceil(total * SR), SR);
+    for (const c of cues) {
+      const buf = decoded[c.index]; if (!buf) continue;
+      const w = windowDur(c);
+      const s = off.createBufferSource(); s.buffer = buf;
+      if (buf.duration > w) s.playbackRate.value = buf.duration / w;
+      s.connect(off.destination); s.start(c.start);
+    }
+    const rendered = await off.startRendering();
+    const wav = audioBufferToWav(rendered);
+    const blob = new Blob([wav], { type: "audio/wav" });
+    const base = (srtName || "dub").replace(/\.srt$/i, "");
+    const langPart = language ? "." + language.trim().toLowerCase().replace(/\s+/g, "-") : "";
+    const fname = base + langPart + ".wav";
+    const url = URL.createObjectURL(blob);
+    const a = $("downloader"); a.href = url; a.download = fname; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast("Exported " + fname);
+  } catch (e) { console.error(e); toast("Export failed: " + e.message); }
+  finally { btn.textContent = orig; btn.disabled = false; }
+}
+function audioBufferToWav(buffer) {
+  const sampleRate = buffer.sampleRate, data = buffer.getChannelData(0), len = data.length;
+  const dataSize = len * 2, ab = new ArrayBuffer(44 + dataSize), view = new DataView(ab);
+  let o = 0;
+  const wStr = (s) => { for (let i = 0; i < s.length; i++) view.setUint8(o++, s.charCodeAt(i)); };
+  const w32 = (v) => { view.setUint32(o, v, true); o += 4; };
+  const w16 = (v) => { view.setUint16(o, v, true); o += 2; };
+  wStr("RIFF"); w32(36 + dataSize); wStr("WAVE"); wStr("fmt "); w32(16); w16(1); w16(1);
+  w32(sampleRate); w32(sampleRate * 2); w16(2); w16(16); wStr("data"); w32(dataSize);
+  for (let i = 0; i < len; i++) { let s = Math.max(-1, Math.min(1, data[i])); view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2; }
+  return ab;
+}
+
+/* ================= File load ================= */
+async function loadSRTText(text, name) {
+  const parsed = parseSRT(text);
+  if (!parsed.length) { toast("No subtitles found in that file."); return; }
+  cues = parsed; srtName = name;
+  clips = {}; clipMeta = {}; await idbClear("clips");
+  if (!language) await promptLanguage();
+  await saveState(); showEditor();
+  openStudio(); // studio is the default experience
+}
+function showEditor() {
+  $("uploadView").style.display = "none";
+  $("editorView").style.display = "";
+  $("studioBtn").style.display = ""; $("exportBtn").style.display = ""; $("changeSrtBtn").style.display = "";
+  $("langPill").style.display = language ? "" : "none";
+  $("langPill").textContent = "🌐 " + (language || "");
+  $("fileName").textContent = srtName;
+  renderList(); updateProgress();
+}
+async function promptLanguage() {
+  const l = prompt("What language are you recording in? (e.g. Konkani — used for the export filename)", language || "");
+  if (l && l.trim()) language = l.trim();
+}
+
+/* ================= Settings ================= */
+function loadSettings() {
+  try { const s = JSON.parse(localStorage.getItem("srtdub-settings") || "{}"); Object.assign(settings, s); } catch (e) {}
+  $("setPrep").value = settings.prep; $("setPrepV").textContent = settings.prep;
+  $("setSilence").value = settings.silence; $("setSilenceV").textContent = settings.silence.toFixed(1);
+  $("setSens").value = settings.sens; $("setSensV").textContent = settings.sens;
+}
+function saveSettings() { localStorage.setItem("srtdub-settings", JSON.stringify(settings)); }
+
+/* ================= Wire up ================= */
+const drop = $("drop"), fileInput = $("fileInput");
+drop.onclick = () => fileInput.click();
+["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) readFile(f); });
+fileInput.onchange = () => { if (fileInput.files[0]) readFile(fileInput.files[0]); };
+function readFile(f) { const r = new FileReader(); r.onload = () => loadSRTText(decodeBytes(r.result), f.name); r.readAsArrayBuffer(f); }
+
+$("studioBtn").onclick = () => openStudio();
+$("exportBtn").onclick = exportWav;
+$("changeSrtBtn").onclick = () => { if (Object.keys(clips).length && !confirm("Loading a new SRT will clear your current recordings. Continue?")) return; fileInput.value = ""; fileInput.click(); };
+
+$("stList").onclick = closeStudio;
+$("stExportTop").onclick = exportWav;
+$("stPause").onclick = () => {
+  if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
+  else if (paused) resumeSession();
+  else pauseSession();
+};
+$("stPrev").onclick = prevLine;
+$("stSkip").onclick = skipLine;
+$("stRedo").onclick = redoLine;
+
+// Scrubber: slide to preview any line; release to set start point.
+$("scrubber").oninput = (e) => {
+  cancelRecorder();
+  stIndex = +e.target.value;
+  phase = "seeking";
+  $("stCountdown").style.display = "none";
+  $("stTimer").textContent = "";
+  showCurrentLine();
+  setStatus('<span class="paused">' + (clips[stIndex] ? "✓ has take" : "PREVIEW") + '</span>');
+  updatePrimaryBtn();
+};
+$("scrubber").onchange = () => { afterNav(); };
+
+$("setPrep").oninput = (e) => { settings.prep = +e.target.value; $("setPrepV").textContent = settings.prep; saveSettings(); };
+$("setSilence").oninput = (e) => { settings.silence = +e.target.value; $("setSilenceV").textContent = settings.silence.toFixed(1); saveSettings(); };
+$("setSens").oninput = (e) => { settings.sens = +e.target.value; $("setSensV").textContent = settings.sens; saveSettings(); };
+
+document.addEventListener("keydown", (e) => {
+  if (!studioOn) return;
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
+    else if (phase === "prep") gotoRecording();
+    else if (phase === "recording") stopRecording();
+    else if (phase === "paused") resumeSession();
+  } else if (e.code === "ArrowLeft") { e.preventDefault(); prevLine(); }
+  else if (e.code === "ArrowRight") { e.preventDefault(); skipLine(); }
+  else if (e.code === "Escape") { e.preventDefault(); closeStudio(); }
+});
+
+/* ================= Boot ================= */
+(async function boot() {
+  loadSettings();
+  try {
+    db = await openDB();
+    const st = await idbGet("state", "project");
+    if (st && st.cues && st.cues.length) {
+      cues = st.cues; language = st.language || ""; srtName = st.srtName || "";
+      for (const c of cues) { const rec = await idbGet("clips", c.index); if (rec && rec.blob) { clips[c.index] = rec.blob; clipMeta[c.index] = { duration: rec.duration }; } }
+      showEditor(); openStudio(); toast("Restored your saved project.");
+    }
+  } catch (e) { console.error("boot", e); }
+})();
+</script>
+</body>
+</html>
