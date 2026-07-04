@@ -144,7 +144,7 @@
   <span id="progressPill" class="pill" style="display:none"></span>
   <div class="spacer"></div>
   <button id="studioBtn" class="primary" style="display:none">▶ Recording Studio</button>
-  <button id="exportBtn" style="display:none" disabled>Export WAV</button>
+  <button id="exportBtn" style="display:none" disabled>Export MP3</button>
   <button id="changeSrtBtn" class="ghost" style="display:none">New SRT</button>
 </header>
 
@@ -218,6 +218,7 @@
 <div class="toast" id="toast"></div>
 <a class="hidden-dl" id="downloader"></a>
 
+<script src="lame.min.js"></script>
 <script>
 "use strict";
 
@@ -655,9 +656,18 @@ function getBlobDuration(blob) {
 }
 
 /* ================= Export ================= */
-async function exportWav() {
-  const btn = $("exportBtn"); btn.disabled = true; const orig = btn.textContent; btn.textContent = "Rendering…";
+const MP3_KBPS = 96;          // mono voice — small files, clean speech
+let exporting = false;
+
+async function exportAudio() {
+  if (exporting) return;
+  if (typeof lamejs === "undefined") { toast("MP3 encoder not loaded (lame.min.js missing)."); return; }
+  if (!Object.keys(clips).length) { toast("Nothing recorded yet."); return; }
+  exporting = true;
+  const btn = $("exportBtn"); const orig = btn.textContent; btn.disabled = true; btn.textContent = "Rendering…";
+  toast("Rendering timeline…");
   try {
+    // Use 44.1kHz for rendering; LAME accepts it directly.
     const SR = 44100;
     const dctx = new (window.AudioContext || window.webkitAudioContext)();
     const decoded = {};
@@ -680,35 +690,57 @@ async function exportWav() {
       const buf = decoded[c.index]; if (!buf) continue;
       const w = windowDur(c);
       const s = off.createBufferSource(); s.buffer = buf;
-      if (buf.duration > w) s.playbackRate.value = buf.duration / w;
+      if (buf.duration > w) s.playbackRate.value = buf.duration / w; // speed up to fit
       s.connect(off.destination); s.start(c.start);
     }
     const rendered = await off.startRendering();
-    const wav = audioBufferToWav(rendered);
-    const blob = new Blob([wav], { type: "audio/wav" });
+
+    btn.textContent = "Encoding MP3…";
+    toast("Encoding MP3… (may take a moment for long films)");
+    const blob = await audioBufferToMp3Blob(rendered, MP3_KBPS, (pct) => { btn.textContent = "Encoding " + pct + "%"; });
+
     const base = (srtName || "dub").replace(/\.srt$/i, "");
     const langPart = language ? "." + language.trim().toLowerCase().replace(/\s+/g, "-") : "";
-    const fname = base + langPart + ".wav";
+    const fname = base + langPart + ".mp3";
     const url = URL.createObjectURL(blob);
     const a = $("downloader"); a.href = url; a.download = fname; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-    toast("Exported " + fname);
+    setTimeout(() => URL.revokeObjectURL(url), 6000);
+    toast("Exported " + fname + " · " + (blob.size / 1048576).toFixed(1) + " MB");
   } catch (e) { console.error(e); toast("Export failed: " + e.message); }
-  finally { btn.textContent = orig; btn.disabled = false; }
-}
-function audioBufferToWav(buffer) {
-  const sampleRate = buffer.sampleRate, data = buffer.getChannelData(0), len = data.length;
-  const dataSize = len * 2, ab = new ArrayBuffer(44 + dataSize), view = new DataView(ab);
-  let o = 0;
-  const wStr = (s) => { for (let i = 0; i < s.length; i++) view.setUint8(o++, s.charCodeAt(i)); };
-  const w32 = (v) => { view.setUint32(o, v, true); o += 4; };
-  const w16 = (v) => { view.setUint16(o, v, true); o += 2; };
-  wStr("RIFF"); w32(36 + dataSize); wStr("WAVE"); wStr("fmt "); w32(16); w16(1); w16(1);
-  w32(sampleRate); w32(sampleRate * 2); w16(2); w16(16); wStr("data"); w32(dataSize);
-  for (let i = 0; i < len; i++) { let s = Math.max(-1, Math.min(1, data[i])); view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2; }
-  return ab;
+  finally { btn.textContent = orig; btn.disabled = false; exporting = false; }
 }
 
+/* Encode a mono AudioBuffer to an MP3 Blob using lamejs. Yields to the UI so it can't freeze. */
+function audioBufferToMp3Blob(buffer, kbps, onProgress) {
+  return new Promise((resolve) => {
+    const sr = buffer.sampleRate;
+    const ch = buffer.getChannelData(0);
+    const enc = new lamejs.Mp3Encoder(1, sr, kbps);
+    const block = 1152;
+    const samples = new Int16Array(block);
+    const parts = [];
+    let i = 0;
+    const len = ch.length;
+    function step() {
+      const deadline = performance.now() + 40; // work ~40ms then yield
+      while (i < len && performance.now() < deadline) {
+        const n = Math.min(block, len - i);
+        for (let j = 0; j < n; j++) { const s = Math.max(-1, Math.min(1, ch[i + j])); samples[j] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+        const chunk = enc.encodeBuffer(n === block ? samples : samples.subarray(0, n));
+        if (chunk.length) parts.push(new Int8Array(chunk));
+        i += n;
+      }
+      if (onProgress) onProgress(Math.floor(i / len * 100));
+      if (i < len) { setTimeout(step, 0); }
+      else {
+        const end = enc.flush();
+        if (end.length) parts.push(new Int8Array(end));
+        resolve(new Blob(parts, { type: "audio/mpeg" }));
+      }
+    }
+    step();
+  });
+}
 /* ================= File load ================= */
 async function loadSRTText(text, name) {
   const parsed = parseSRT(text);
@@ -752,11 +784,11 @@ fileInput.onchange = () => { if (fileInput.files[0]) readFile(fileInput.files[0]
 function readFile(f) { const r = new FileReader(); r.onload = () => loadSRTText(decodeBytes(r.result), f.name); r.readAsArrayBuffer(f); }
 
 $("studioBtn").onclick = () => openStudio();
-$("exportBtn").onclick = exportWav;
+$("exportBtn").onclick = exportAudio;
 $("changeSrtBtn").onclick = () => { if (Object.keys(clips).length && !confirm("Loading a new SRT will clear your current recordings. Continue?")) return; fileInput.value = ""; fileInput.click(); };
 
 $("stList").onclick = closeStudio;
-$("stExportTop").onclick = exportWav;
+$("stExportTop").onclick = exportAudio;
 $("stPause").onclick = () => {
   if (phase === "idle" || phase === "done" || phase === "seeking") startSession();
   else if (paused) resumeSession();
